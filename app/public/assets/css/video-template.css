@@ -1,0 +1,158 @@
+@font-face {
+  font-family: "Quicksand";
+  src: url("../fonts/quicksand/quicksand-300-normal.woff2") format("woff2");
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Quicksand";
+  src: url("../fonts/quicksand/quicksand-700-normal.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Work Sans";
+  src: url("../fonts/work-sans/work-sans-100-normal.woff2") format("woff2");
+  font-weight: 100;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Work Sans";
+  src: url("../fonts/work-sans/work-sans-100-italic.woff2") format("woff2");
+  font-weight: 100;
+  font-style: italic;
+  font-display: swap;
+}
+
+/* ========================================================================== */
+/* video-template.css                                                         */
+/* ========================================================================== */
+/*
+ * Purpose
+ * -------
+ * Central styling defaults for Remotion-rendered videos.
+ *
+ * These variables allow the video appearance to be changed from one place
+ * without touching JSX layout code. They can also be overridden later
+ * by theme presets or JSON-driven configuration.
+ *
+ * Controlled properties
+ * ---------------------
+ * - Font family used inside the video
+ * - Default text color
+ * - Default background color
+ *
+ * Usage
+ * -----
+ * Import this stylesheet in the Remotion composition or global template.
+ * JSX elements can then rely on these CSS variables.
+ *
+ * Example:
+ *   style={{ fontFamily: "var(--video-font-family)" }}
+ *   style={{ color: "var(--video-text-color)" }}
+ *   style={{ background: "var(--video-background-color)" }}
+ */
+/* ========================================================================== */
+
+:root {
+  /* ---------------------------------------------------------------------- */
+  /* Typography                                                             */
+  /* ---------------------------------------------------------------------- */
+
+  --video-font-family: "Quicksand", "Work Sans", system-ui, -apple-system, sans-serif;
+
+  /* ---------------------------------------------------------------------- */
+  /* Colors                                                                 */
+  /* ---------------------------------------------------------------------- */
+
+  --video-text-color: #ffffff;
+  --video-caption-color: #ffd84d;
+  --video-background-color: #0b1020;
+
+  /* ---------------------------------------------------------------------- */
+  /* Optional accent colors                                                 */
+  /* ---------------------------------------------------------------------- */
+
+  --video-accent-color: #3b82f6;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Video container                                                            */
+/* -------------------------------------------------------------------------- */
+
+.video-template {
+  font-family: var(--video-font-family);
+  color: var(--video-text-color);
+  background: var(--video-background-color);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Typography helpers                                                         */
+/* -------------------------------------------------------------------------- */
+
+.video-title {
+  font-family: var(--video-font-family);
+  color: var(--video-text-color);
+  font-weight: 700;
+
+  /* readability on bright images */
+  text-shadow:
+    0 2px 6px rgba(0,0,0,0.85),
+    0 0 2px rgba(0,0,0,0.9);
+
+  /* soft backdrop */
+  background: rgba(0,0,0,0.25);
+  padding: 6px 12px;
+  border-radius: 6px;
+
+  /* animation hooks (controlled from JSX / Remotion) */
+  transform: translate(
+    var(--video-title-x, 0px),
+    var(--video-title-y, 0px)
+  );
+  opacity: var(--video-title-opacity, 1);
+  letter-spacing: var(--video-title-letter-spacing, 0px);
+  transition: none;
+}
+
+.video-subtitle {
+  font-family: var(--video-font-family);
+  color: var(--video-text-color);
+  opacity: var(--video-subtitle-opacity, 0.85);
+
+  text-shadow:
+    0 2px 6px rgba(0,0,0,0.85),
+    0 0 2px rgba(0,0,0,0.9);
+
+  background: rgba(0,0,0,0.2);
+  padding: 4px 10px;
+  border-radius: 6px;
+
+  transform: translate(
+    var(--video-subtitle-x, 0px),
+    var(--video-subtitle-y, 0px)
+  );
+  letter-spacing: var(--video-subtitle-letter-spacing, 0px);
+}
+
+
+
+.video-caption {
+  font-family: var(--video-font-family);
+  color: var(--video-caption-color);
+  opacity: 0.95;
+
+  text-shadow:
+    0 2px 6px rgba(0,0,0,0.85),
+    0 0 2px rgba(0,0,0,0.9);
+
+  background: rgba(0,0,0,0.35);
+  padding: 6px 10px;
+  border-radius: 6px;
+}
