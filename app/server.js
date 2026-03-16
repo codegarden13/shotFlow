@@ -28,6 +28,7 @@
  * - Added merged asset loading for configured and unassigned images
  * - Standardized async JSON route handling with shared wrappers
  * - Kept render and preview execution delegated to child processes
+ * - Added audio metadata route with on-demand beat-file generation
  */
 /* ========================================================================== */
 
@@ -38,6 +39,8 @@ import {fileURLToPath} from "node:url";
 import {spawn} from "node:child_process";
 
 import {toPreviewUrl} from "./lib/video/video-paths.js";
+import {getAudioMetadata} from "./lib/video/get-audio-metadata.js";
+import {ensureMusicBeatsFile} from "./lib/video/ensure-music-beats.js";
 
 /* -------------------------------------------------------------------------- */
 /* Paths and runtime constants                                                */
@@ -267,7 +270,6 @@ function resolveRuntimePort(appConfig = {}) {
 
   return RUNTIME.defaultPort;
 }
-
 
 /**
  * Returns the normalized file name from one source path.
@@ -691,6 +693,29 @@ function createAsyncJsonHandler(handler) {
 }
 
 /**
+ * Returns normalized audio metadata for the current project.
+ * The beat metadata file is generated on demand before reading the final
+ * audio metadata payload so transient markers become available to the GUI.
+ */
+const getAudioMetadataRoute = createAsyncJsonHandler(async () => {
+  await ensureMusicBeatsFile();
+  const data = await getAudioMetadata();
+
+  return {
+    ok: true,
+    hasAudio: Boolean(data?.hasAudio),
+    durationSeconds: Number(data?.audioDurationSeconds ?? 0),
+    beatCount: Number(data?.beatCount ?? 0),
+    transients: Array.isArray(data?.beatData?.transients)
+      ? data.beatData.transients
+      : [],
+    waveform: Array.isArray(data?.beatData?.waveform)
+      ? data.beatData.waveform
+      : [],
+  };
+});
+
+/**
  * Returns a compact health/debug payload so the GUI can verify server state.
  *
  * @param {import("express").Request} _req
@@ -766,6 +791,7 @@ app.get("/api/video-config", getVideoConfig);
 app.post("/api/video-config/shot", postVideoConfigShot);
 app.post("/api/render", postRender);
 app.post("/api/preview-frame", postPreviewFrame);
+app.get("/api/audio-metadata", getAudioMetadataRoute);
 
 /* -------------------------------------------------------------------------- */
 /* Server start                                                               */

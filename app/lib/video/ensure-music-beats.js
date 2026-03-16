@@ -13,7 +13,8 @@
  * - Resolve the configured music and beats file names
  * - Decode the source MP3 to mono PCM via `ffmpeg`
  * - Compute spectral flux values over the decoded samples
- * - Pick transient peaks and persist them as `music-beats.json`
+ * - Pick transient peaks and build condensed waveform timeline data
+ * - Persist beat and waveform analysis as `music-beats.json`
  *
  * Runtime model
  * -------------
@@ -27,8 +28,8 @@
  * - This module intentionally keeps analysis dependency-free.
  * - The direct DFT is slower than an FFT, but acceptable for the current
  *   offline preprocessing step.
- * - The generated JSON stores `transients` only; other modules may interpret
- *   these as beats until richer analysis is added later.
+ * - The generated JSON stores `transients` plus condensed waveform peaks for
+ *   timeline rendering in the frontend.
  *
  * Change log
  * ----------
@@ -36,6 +37,7 @@
  * - Added full module header and clearer section structure
  * - Standardized path/config helpers with current app conventions
  * - Improved public return payload and preserved no-op behavior when file exists
+ * - Added condensed waveform generation for frontend audio-timeline rendering
  */
 /* ========================================================================== */
 
@@ -63,6 +65,7 @@ const ANALYSIS = {
   peakThresholdOffset: 0.08,
   thresholdRadius: 8,
   minIntervalSeconds: 0.22,
+  waveformBins: 240,
 };
 
 const AUDIO_DEFAULTS = {
@@ -351,6 +354,51 @@ function normalizeFlux(flux) {
   }));
 }
 
+/**
+ * Builds a condensed absolute-amplitude waveform for timeline rendering.
+ * The returned values are normalized into the range 0..1.
+ *
+ * @param {Float32Array} samples
+ * @param {number} binCount
+ * @returns {number[]}
+ */
+function buildWaveformPeaks(samples, binCount) {
+  if (!samples.length || binCount <= 0) {
+    return [];
+  }
+
+  const safeBinCount = Math.max(1, Math.min(binCount, samples.length));
+  const samplesPerBin = Math.max(1, Math.floor(samples.length / safeBinCount));
+  const peaks = [];
+
+  for (let binIndex = 0; binIndex < safeBinCount; binIndex += 1) {
+    const start = binIndex * samplesPerBin;
+    const end =
+      binIndex === safeBinCount - 1
+        ? samples.length
+        : Math.min(samples.length, start + samplesPerBin);
+
+    let peak = 0;
+
+    for (let sampleIndex = start; sampleIndex < end; sampleIndex += 1) {
+      const amplitude = Math.abs(samples[sampleIndex]);
+      if (amplitude > peak) {
+        peak = amplitude;
+      }
+    }
+
+    peaks.push(peak);
+  }
+
+  const maxPeak = Math.max(...peaks, 0);
+
+  if (maxPeak <= 0) {
+    return peaks.map(() => 0);
+  }
+
+  return peaks.map((value) => Number((value / maxPeak).toFixed(4)));
+}
+
 /* -------------------------------------------------------------------------- */
 /* Peak picking                                                               */
 /* -------------------------------------------------------------------------- */
@@ -426,6 +474,7 @@ function pickPeaks(normalizedFlux) {
  *   audioFile: string,
  *   beatsFile: string,
  *   transientCount?: number,
+ *   waveformBins?: number,
  * }>} 
  */
 export async function ensureMusicBeatsFile() {
@@ -449,6 +498,8 @@ export async function ensureMusicBeatsFile() {
   const rawFlux = computeSpectralFlux(samples, sampleRate);
   const normalizedFlux = normalizeFlux(rawFlux);
   const transients = pickPeaks(normalizedFlux);
+  const waveform = buildWaveformPeaks(samples, ANALYSIS.waveformBins);
+  const durationSeconds = Number((samples.length / sampleRate).toFixed(4));
 
   const payload = {
     source: context.audioFile,
@@ -456,8 +507,10 @@ export async function ensureMusicBeatsFile() {
     outputFileName: context.beatsFileName,
     method: "spectral-flux",
     sampleRate,
+    durationSeconds,
     frameSize: ANALYSIS.frameSize,
     hopSize: ANALYSIS.hopSize,
+    waveform,
     transients,
   };
 
@@ -470,6 +523,7 @@ export async function ensureMusicBeatsFile() {
     audioFile: context.audioFile,
     beatsFile: context.beatsFile,
     transientCount: transients.length,
+    waveformBins: waveform.length,
   };
 }
 

@@ -12,20 +12,20 @@
  * - Coordinate UI state, DOM updates and backend actions
  * - Load normalized shot/config data into frontend runtime state
  * - Drive the asset editor, stage preview and render actions
- * - Glue together helper modules such as `state.js`, `dom.js` and `api.js`
+ * - Glue together helper modules such as `state.js`, `dom.js`, `api.js`,
+ *   `timeline.js`, `inspector.js` and `assets.js`
  *
  * Notes
  * -----
  * - This file still contains multiple concerns and should continue to be split
  *   into smaller modules over time.
- * - Timeline rendering helpers are currently expected to exist in the host app
- *   runtime and are invoked from here.
- * - Orchestrator is
- *    - init()
- *    - loadVideoConfigData()
- *    - startVideoRender()
- *    - startPreviewFrameRender()
- *    - registerActionEvents()
+ * - Audio metadata is loaded during bootstrap and cached in `state.audio`.
+ * - The main orchestrator responsibilities remain:
+ *   - `init()`
+ *   - `loadVideoConfigData()`
+ *   - `startVideoRender()`
+ *   - `startPreviewFrameRender()`
+ *   - `registerActionEvents()`
  *
  * Change log
  * ----------
@@ -34,21 +34,24 @@
  * - Cleaned import formatting and section spacing
  * - Kept runtime behavior unchanged during refactor
  * 
- * 2026-03-15 
- * - implemented inspector.js
- * - implemented assets.js
- * 
- * 
+ * 2026-03-15
+ * - Implemented `inspector.js` and `assets.js`
+ * - Moved audio metadata loading into bootstrap instead of top-level execution
+ * - Tightened comments and removed stale host-runtime wording
  */
 
 import {dom} from "./assets/js/dom.js";
+
 import {
   buildRenderOptions,
+  requestAudioMetadata,
   requestPreviewFrame,
-  requestSaveShot,
   requestVideoConfig,
   requestVideoRender,
 } from "./assets/js/api.js";
+
+
+
 import {
   resetRenderProgress,
   setOutput,
@@ -59,8 +62,6 @@ import {
   startRenderProgressAnimation,
   stopRenderProgressAnimation,
   syncActionButtonsState,
-  toggleJsonEditor,
-  toggleVideoPlaceholder,
 } from "./assets/js/ui.js";
 import {UI_TEXT, state} from "./assets/js/state.js";
 import {
@@ -81,8 +82,6 @@ import {
 /* -------------------------------------------------------------------------- */
 /* FORMAT HELPERS                                                             */
 /* -------------------------------------------------------------------------- */
-
-
 
 
 /**
@@ -124,8 +123,25 @@ async function loadVideoConfigData() {
 }
 
 
-const audioMeta = await requestAudioMetadata();
-state.audio = audioMeta;
+/**
+ * Loads normalized audio metadata into the shared runtime state.
+ * If the backend audio endpoint is unavailable, the editor stays usable and
+ * falls back to an empty audio state.
+ */
+async function loadAudioMetadata() {
+  try {
+    state.audio = await requestAudioMetadata();
+  } catch (error) {
+    console.error(error);
+    state.audio = {
+      hasAudio: false,
+      durationSeconds: 0,
+      beatCount: 0,
+      transients: [],
+      waveform: [],
+    };
+  }
+}
 
 
 /* -------------------------------------------------------------------------- */
@@ -387,6 +403,7 @@ async function init() {
 
   try {
     await loadVideoConfigData();
+    await loadAudioMetadata();
     finalizeInitialLoad();
   } catch (error) {
     failInitialLoad(error);

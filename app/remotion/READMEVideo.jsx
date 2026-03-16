@@ -27,6 +27,7 @@
  *   intro?: {
  *     title?: string,
  *     subtitle?: string,
+ *     background?: any,
  *     layout?: any,
  *     titleAnimation?: any,
  *     subtitleAnimation?: any
@@ -62,6 +63,7 @@
  * - Standardized section comments and function headers
  * - Refactored intro and shot helpers into clearer config-driven accessors
  * - Added JSON-driven shot caption animation support with stable fallbacks
+ * - Added JSON-driven intro background image and overlay support
  *
  * Notes for future work
  * ---------------------
@@ -159,7 +161,7 @@ const getMediaFileName = (fileName, fallback) => fileName || fallback;
  * `title` and `subtitle` while allowing future migration to `intro.*`.
  *
  * @param {{title?: string, subtitle?: string, intro?: any}} props
- * @returns {{title?: string, subtitle?: string, layout?: any, titleAnimation?: any, subtitleAnimation?: any}}
+ * @returns {{title?: string, subtitle?: string, background?: any, layout?: any, titleAnimation?: any, subtitleAnimation?: any}}
  */
 
 function getIntroConfig(props = {}) {
@@ -168,6 +170,7 @@ function getIntroConfig(props = {}) {
   return {
     title: intro.title ?? props.title,
     subtitle: intro.subtitle ?? props.subtitle,
+    background: intro.background || {},
     layout: intro.layout || {},
     titleAnimation: intro.titleAnimation || {},
     subtitleAnimation: intro.subtitleAnimation || {},
@@ -186,6 +189,22 @@ function getIntroLayoutConfig(layout = {}) {
     verticalAlign: layout?.verticalAlign || "center",
     offsetX: Number(layout?.offsetX ?? 0),
     offsetY: Number(layout?.offsetY ?? 0),
+  };
+}
+
+/**
+ * Returns a normalized intro background configuration.
+ *
+ * @param {any} background
+ * @returns {{image: string, size: string, position: string, overlayColor: string, overlayOpacity: number}}
+ */
+function getIntroBackgroundConfig(background = {}) {
+  return {
+    image: background?.image || "",
+    size: background?.size || "cover",
+    position: background?.position || "center center",
+    overlayColor: background?.overlayColor || "transparent",
+    overlayOpacity: Number(background?.overlayOpacity ?? 0),
   };
 }
 
@@ -634,6 +653,40 @@ function getIntroContainerStyle(frame, introConfig) {
 }
 
 /**
+ * Builds the intro background image style.
+ *
+ * @param {{background?: any}} introConfig
+ * @returns {React.CSSProperties}
+ */
+function getIntroBackgroundImageStyle(introConfig) {
+  const background = getIntroBackgroundConfig(introConfig?.background);
+
+  return {
+    backgroundImage: background.image
+      ? `url(${buildMediaUrl(background.image)})`
+      : "none",
+    backgroundSize: background.size,
+    backgroundPosition: background.position,
+    backgroundRepeat: "no-repeat",
+  };
+}
+
+/**
+ * Builds the intro background overlay style.
+ *
+ * @param {{background?: any}} introConfig
+ * @returns {React.CSSProperties}
+ */
+function getIntroBackgroundOverlayStyle(introConfig) {
+  const background = getIntroBackgroundConfig(introConfig?.background);
+
+  return {
+    backgroundColor: background.overlayColor,
+    opacity: background.overlayOpacity,
+  };
+}
+
+/**
  * Builds the animated outro text style.
  * The outro text enters from above, stays readable, and continues traveling
  * downward during the full outro section.
@@ -699,9 +752,13 @@ const BackgroundMusic = ({src = MUSIC_DEFAULTS.src}) => {
 const Intro = ({title, subtitle, introConfig}) => {
   const frame = useCurrentFrame();
   const containerStyle = getIntroContainerStyle(frame, introConfig);
+  const background = getIntroBackgroundConfig(introConfig?.background);
 
   return (
     <AbsoluteFill className="video-template" style={fullscreenCenterStyle}>
+      {background.image ? <AbsoluteFill style={getIntroBackgroundImageStyle(introConfig)} /> : null}
+      <AbsoluteFill style={getIntroBackgroundOverlayStyle(introConfig)} />
+
       <div style={containerStyle}>
         <h1 className="video-title" style={getIntroTitleStyle()}>{title}</h1>
         <p className="video-subtitle" style={getIntroSubtitleStyle()}>{subtitle}</p>
@@ -758,7 +815,7 @@ const Outro = ({text}) => {
         paddingTop: 0,
       }}
     >
-       <h2 style={getOutroAnimatedStyle(frame)}>{text}outro H2</h2> 
+      <h2 style={getOutroAnimatedStyle(frame)}>{text}</h2>
     </AbsoluteFill>
   );
 };

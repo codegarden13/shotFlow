@@ -9,6 +9,7 @@
  * Responsibilities
  * ----------------
  * - Render the layered timeline UI (scale, segments, beats, waveform, footer)
+ * - Prefer loaded audio metadata for beat markers and footer summaries
  * - Resolve the active segment from the current playhead position
  * - Keep stage preview and timeline playheads visually synchronized
  * - Translate pointer movement into timeline scrubbing
@@ -18,16 +19,16 @@
  * Notes
  * -----
  * - This module imports its direct dependencies explicitly.
- * - Beat markers are still a placeholder until `music-beats.json` is wired in.
- * - The waveform is currently a deterministic visual placeholder, not a real
- *   decoded audio waveform.
+ * - Beat markers are rendered from `state.audio.transients` when available.
+ * - The waveform prefers `state.audio.waveform` when available and falls back
+ *   to a deterministic placeholder when no decoded peaks are loaded yet.
  *
  * Change log
  * ----------
  * 2026-03-15
  * - Refactored helper ordering and section structure for consistency
  * - Extracted waveform drawing constants and playhead clamping helpers
- * - Kept current runtime behavior unchanged while tightening comments
+ * - Added audio-metadata helpers for beat markers, footer summaries and waveform rendering
  */
 /* ========================================================================== */
 
@@ -88,7 +89,7 @@ export function getTotalDuration() {
  * @returns {number}
  */
 export function toTimelinePercent(value) {
-  return (Math.max(0, value) / getTotalDuration()) * 100;
+  return (Math.max(0, value) / getEffectiveTimelineDuration()) * 100;
 }
 
 /**
@@ -97,7 +98,7 @@ export function toTimelinePercent(value) {
  * @returns {string[]}
  */
 export function getTimelineScaleLabels() {
-  const totalDuration = getTotalDuration();
+  const totalDuration = getEffectiveTimelineDuration();
   const tickCount = 5;
 
   return Array.from({length: tickCount}, (_, index) => {
@@ -128,6 +129,45 @@ function withCacheBust(url) {
  */
 function clampPercent(value) {
   return Math.max(0, Math.min(100, value));
+}
+
+/**
+ * Returns normalized transient markers from shared audio runtime state.
+ *
+ * @returns {number[]}
+ */
+function getAudioTransients() {
+  return Array.isArray(state.audio?.transients) ? state.audio.transients : [];
+}
+
+/**
+ * Returns the loaded audio duration in seconds if available.
+ *
+ * @returns {number}
+ */
+function getAudioDurationSeconds() {
+  const value = Number(state.audio?.durationSeconds ?? 0);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/**
+ * Returns normalized waveform peaks from shared audio runtime state.
+ *
+ * @returns {number[]}
+ */
+function getAudioWaveform() {
+  return Array.isArray(state.audio?.waveform) ? state.audio.waveform : [];
+}
+
+/**
+ * Returns the effective duration used for timeline labeling and marker
+ * placement. Audio duration wins when available so beat markers align to the
+ * same visible scale.
+ *
+ * @returns {number}
+ */
+function getEffectiveTimelineDuration() {
+  return Math.max(getTotalDuration(), getAudioDurationSeconds(), 1);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -172,12 +212,27 @@ function renderTimelineSegments() {
 }
 
 /**
- * Clears and prepares the beat layer.
- * Real transient markers will be rendered here once beat analysis is connected.
+ * Renders all beat markers from audio transients if available.
  */
 function renderTimelineBeats() {
   if (!dom.timelineBeatsLayer) return;
-  dom.timelineBeatsLayer.innerHTML = "";
+
+  const transients = getAudioTransients();
+
+  dom.timelineBeatsLayer.innerHTML = transients
+    .map((time, index) => {
+      const left = toTimelinePercent(time);
+
+      return `
+        <div
+          class="timeline-beat-marker"
+          data-beat-index="${index}"
+          style="left: ${left}%"
+          title="Beat ${index + 1} · ${formatTime(time)}"
+        ></div>
+      `;
+    })
+    .join("");
 }
 
 /**
@@ -197,32 +252,45 @@ function drawWaveformBaseline(context, width, midY) {
 }
 
 /**
- * Draws a deterministic placeholder waveform into the canvas layer.
- * This keeps the layout visually stable until real decoded audio data exists.
+ * Draws waveform bars into the canvas layer.
+ * Uses real decoded waveform peaks if available, otherwise falls back to a deterministic placeholder.
  *
  * @param {CanvasRenderingContext2D} context
  * @param {number} width
  * @param {number} height
  */
 function drawWaveformBars(context, width, height) {
+  const waveform = getAudioWaveform();
   const midY = height / 2;
   const step = WAVEFORM.barWidth + WAVEFORM.gap;
-  const barCount = Math.floor(width / step);
+  const visibleBarCount = Math.max(1, Math.floor(width / step));
+  const sourceValues = waveform.length
+    ? Array.from({length: visibleBarCount}, (_, index) => {
+        const sourceIndex = Math.min(
+          waveform.length - 1,
+          Math.floor((index / visibleBarCount) * waveform.length)
+        );
+        return Number(waveform[sourceIndex] ?? 0);
+      })
+    : Array.from({length: visibleBarCount}, (_, index) => {
+        return 0.2 + Math.abs(Math.sin(index * 0.32)) * 0.8;
+      });
 
   context.fillStyle = WAVEFORM.barColor;
 
-  for (let index = 0; index < barCount; index += 1) {
+  for (let index = 0; index < sourceValues.length; index += 1) {
     const x = index * step;
-    const amplitude = 0.2 + Math.abs(Math.sin(index * 0.32)) * 0.8;
-    const barHeight = amplitude * (height * 0.42);
+    const amplitude = Math.max(0, Math.min(1, sourceValues[index]));
+    const barHeight = Math.max(2, amplitude * (height * 0.42));
 
     context.fillRect(x, midY - barHeight / 2, WAVEFORM.barWidth, barHeight);
   }
 }
 
 /**
- * Draws a deterministic placeholder waveform into the canvas layer.
- * This keeps the layout visually stable until real decoded audio data exists.
+ * Draws the timeline waveform into the canvas layer.
+ * Real decoded waveform peaks are preferred, with a deterministic fallback when
+ * no audio waveform data is available yet.
  */
 function renderTimelineWaveform() {
   const canvas = dom.timelineWaveformCanvas;
@@ -248,15 +316,26 @@ function renderTimelineWaveform() {
 }
 
 /**
+ * Builds the footer beat summary for the current timeline state.
+ *
+ * @returns {string}
+ */
+function getTimelineBeatSummary() {
+  const beatCount = getAudioTransients().length;
+  return beatCount > 0 ? String(beatCount) : "noch nicht geladen";
+}
+
+/**
  * Renders a compact footer summary for the current timeline state.
  */
 function renderTimelineFooter() {
   if (!dom.timelineFooter) return;
 
   dom.timelineFooter.textContent =
-    `Dauer: ${formatTime(getTotalDuration())} · ` +
+    `Dauer: ${formatTime(getEffectiveTimelineDuration())} · ` +
     `Shots: ${state.segments.length} · ` +
-    `Beats: noch nicht geladen`;
+    `Beats: ${getTimelineBeatSummary()} · ` +
+    `Waveform: ${getAudioWaveform().length ? "geladen" : "Fallback"}`;
 }
 
 /**
