@@ -10,15 +10,15 @@
  * ----------------
  * - Serve the frontend from `public/`
  * - Expose API endpoints for render, preview and config access
- * - Resolve the configured `video-shots` directory from `config/config.json`
+ * - Resolve the configured `video-shots` root and selected project directory
  * - Merge configured and unassigned image assets for the GUI
- * - Persist shot edits back to `video.config.json`
+ * - Persist shot edits back to the selected project's `video.config.json`
  * - Spawn local render scripts and return their output to the frontend
  *
  * Source of truth
  * ---------------
  * `config/config.json` is the single source of truth for:
- * - `base` -> absolute path to the real `video-shots` directory
+ * - `base` -> absolute path to the real `video-shots` root directory
  * - `port` -> optional default server port
  *
  * Change log
@@ -29,18 +29,60 @@
  * - Standardized async JSON route handling with shared wrappers
  * - Kept render and preview execution delegated to child processes
  * - Added audio metadata route with on-demand beat-file generation
+ *
+ * 2026-03-17
+ * - Added project selection routes for the left project dropdown
+ * - Added runtime-selected project handling for `/video-shots`
+ * - Fixed selected-project propagation to video-config store helpers
+ * - Fixed selected-project propagation for audio metadata lookups
+ * - Fixed preview-frame requests so they render against the selected project
+ * - Fixed final render requests so they render against the selected project
+ * - Included selected-project film metadata in `/api/video-config` responses
+ * - Removed stale unused server-side constants/imports and tightened import layout
+ *
+ * 2026-03-20
+ * - Added CSV export helpers for shot timeline and shot configuration reports
+ * - Extended `/api/video-config` to return generated CSV artifact URLs
+ * - Extended `/api/render` to forward render artifact URLs parsed from renderer stdout
+ *
+ * 2026-03-21
+ * - Extended `/api/audio-metadata` to include project beat-sync config in the UI payload
  */
 /* ========================================================================== */
 
 import express from "express";
-import fs from "node:fs/promises";
+import fs from "node:fs";
 import path from "node:path";
 import {fileURLToPath} from "node:url";
-import {spawn} from "node:child_process";
 
-import {toPreviewUrl} from "./lib/video/video-paths.js";
-import {getAudioMetadata} from "./lib/video/get-audio-metadata.js";
+import {
+  createAudioMetadataResponse,
+  getAudioMetadata,
+} from "./lib/video/get-audio-metadata.js";
 import {ensureMusicBeatsFile} from "./lib/video/ensure-music-beats.js";
+import {
+  loadMergedShots,
+  saveVideoConfig,
+  loadVideoConfigContext,
+  saveProjectConfig,
+  saveShotConfig,
+} from "./lib/video/video-config-store.js";
+import {
+  runRenderProcess,
+  runPreviewFrameProcess,
+} from "./lib/video/render-runner.js";
+import {
+  listProjectDirectories,
+  loadAppConfig,
+  loadAppRuntimeContext,
+  resolveRuntimePort,
+} from "./config/app-config.js";
+import {resetDevLog, writeDevLog} from "./lib/server/dev-log.js";
+import {
+  createAsyncJsonHandler,
+  createJsonErrorResponse,
+  toErrorMessage,
+} from "./lib/server/http-utils.js";
 
 /* -------------------------------------------------------------------------- */
 /* Paths and runtime constants                                                */
@@ -57,19 +99,13 @@ const RUNTIME = {
 const PATHS = {
   appConfigFile: path.join(__dirname, "config", "config.json"),
   publicDir: path.join(__dirname, "public"),
+  csvReportsDir: path.join(__dirname, "public", "reports"),
   renderScript: path.join(__dirname, "lib", "video", "render-video.js"),
   previewFrameScript: path.join(__dirname, "lib", "video", "render-preview-frame.js"),
 };
 
-const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp"]);
-
-const SHOT_DEFAULTS = {
-  duration: 90,
-  zoom: 1,
-  transition: "",
-  pan: "center",
-  caption: "",
-};
+const DEFAULT_PROJECT_NAME = "Project-test";
+let activeProjectName = DEFAULT_PROJECT_NAME;
 
 /* -------------------------------------------------------------------------- */
 /* App bootstrap                                                              */
@@ -77,620 +113,263 @@ const SHOT_DEFAULTS = {
 
 const app = express();
 
+/**
+ * Returns the runtime context for the currently selected project for the GUI.
+ *
+ * @returns {Promise<{
+ *   appConfig: any,
+ *   basePath: string,
+ *   activeProject: string,
+ *   videoShotsDir: string,
+ *   availableProjects: string[],
+ * }>}
+ */
+async function loadSelectedRuntimeContext() {
+  return loadAppRuntimeContext(activeProjectName);
+}
+
+/**
+ * Sanitizes one dynamic file name segment for filesystem usage.
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+function sanitizeFilePart(value = "") {
+  return String(value)
+    .trim()
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, "-")
+    .replace(/\s+/g, "_")
+    .replace(/-+/g, "-")
+    .replace(/_+/g, "_")
+    .replace(/^[-_]+|[-_]+$/g, "") || "untitled";
+}
+
+/**
+ * Escapes one CSV cell value.
+ *
+ * @param {any} value
+ * @returns {string}
+ */
+function csvEscape(value) {
+  const text = String(value ?? "");
+  if (!/[",\n]/.test(text)) return text;
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+/**
+ * Serializes plain row objects to CSV text.
+ *
+ * @param {Array<Object>} rows
+ * @returns {string}
+ */
+function rowsToCsv(rows = []) {
+  if (!Array.isArray(rows) || rows.length === 0) return "";
+
+  const headers = Object.keys(rows[0]);
+  const lines = [headers.join(",")];
+
+  rows.forEach((row) => {
+    lines.push(headers.map((header) => csvEscape(row?.[header])).join(","));
+  });
+
+  return `${lines.join("\n")}\n`;
+}
+
+/**
+ * Resolves the effective FPS from one loaded video config.
+ *
+ * @param {any} videoConfig
+ * @returns {number}
+ */
+function resolveConfigFps(videoConfig) {
+  return Number(videoConfig?.project?.fps ?? 30) || 30;
+}
+
+/**
+ * Resolves one normalized shot duration in seconds.
+ *
+ * @param {any} shot
+ * @returns {number}
+ */
+function resolveShotDurationSeconds(shot) {
+  return Number(shot?.durationSeconds ?? shot?.duration ?? 3) || 3;
+}
+
+/**
+ * Builds timeline CSV rows from the selected project's configured shots.
+ *
+ * @param {any} videoConfig
+ * @returns {Array<Object>}
+ */
+function buildShotTimelineRows(videoConfig = {}) {
+  const shots = Array.isArray(videoConfig?.shots) ? videoConfig.shots : [];
+  const fps = resolveConfigFps(videoConfig);
+  const introFrames = 60;
+  let runningFrame = introFrames;
+
+  return shots.map((shot, index) => {
+    const durationSeconds = resolveShotDurationSeconds(shot);
+    const durationFrames = Math.round(durationSeconds * fps);
+    const startFrame = runningFrame;
+    const endFrame = startFrame + durationFrames;
+
+    runningFrame = endFrame;
+
+    return {
+      index: index + 1,
+      id: String(shot?.id || `shot-${index + 1}`),
+      src: String(shot?.src || ""),
+      title: String(shot?.title || shot?.headline || ""),
+      startFrame,
+      startSeconds: Number((startFrame / fps).toFixed(2)),
+      durationFrames,
+      durationSeconds,
+      endFrame,
+      endSeconds: Number((endFrame / fps).toFixed(2)),
+      fps,
+    };
+  });
+}
+
+/**
+ * Builds configuration CSV rows from the selected project's configured shots.
+ *
+ * @param {any} videoConfig
+ * @returns {Array<Object>}
+ */
+function buildShotConfigRows(videoConfig = {}) {
+  const shots = Array.isArray(videoConfig?.shots) ? videoConfig.shots : [];
+
+  return shots.map((shot, index) => ({
+    index: index + 1,
+    id: String(shot?.id || `shot-${index + 1}`),
+    src: String(shot?.src || ""),
+    title: String(shot?.title || ""),
+    headline: String(shot?.headline || ""),
+    caption: String(shot?.caption || ""),
+    duration: Number(shot?.duration ?? shot?.durationSeconds ?? 3),
+    durationSeconds: Number(shot?.durationSeconds ?? shot?.duration ?? 3),
+    transition: String(shot?.transition || ""),
+    zoom: Number(shot?.zoom ?? 1),
+    pan: String(shot?.pan || "center"),
+    assigned: shot?.assigned === false ? false : true,
+  }));
+}
+
+/**
+ * Writes two stable CSV artifacts for the loaded video config.
+ *
+ * @param {string} activeProject
+ * @param {any} videoConfig
+ * @returns {Promise<{
+ *   timelineCsvUrl: string,
+ *   timelineCsvPath: string,
+ *   shotConfigCsvUrl: string,
+ *   shotConfigCsvPath: string,
+ * }>}
+ */
+async function writeVideoConfigCsvArtifacts(activeProject, videoConfig) {
+  await fs.promises.mkdir(PATHS.csvReportsDir, {recursive: true});
+
+  const safeProjectName = sanitizeFilePart(
+    activeProject || videoConfig?.project?.title || "project"
+  );
+  const timelineFileName = `${safeProjectName}_shot-timeline.csv`;
+  const shotConfigFileName = `${safeProjectName}_shot-config.csv`;
+  const timelineCsvPath = path.join(PATHS.csvReportsDir, timelineFileName);
+  const shotConfigCsvPath = path.join(PATHS.csvReportsDir, shotConfigFileName);
+
+  await fs.promises.writeFile(
+    timelineCsvPath,
+    rowsToCsv(buildShotTimelineRows(videoConfig)),
+    "utf8"
+  );
+  await fs.promises.writeFile(
+    shotConfigCsvPath,
+    rowsToCsv(buildShotConfigRows(videoConfig)),
+    "utf8"
+  );
+
+  return {
+    timelineCsvUrl: `/reports/${timelineFileName}`,
+    timelineCsvPath,
+    shotConfigCsvUrl: `/reports/${shotConfigFileName}`,
+    shotConfigCsvPath,
+  };
+}
+
+/**
+ * Parses one machine-readable render result block from renderer stdout.
+ *
+ * @param {string} stdout
+ * @returns {any | null}
+ */
+function extractRenderResultFromStdout(stdout = "") {
+  const match = String(stdout || "").match(/\[render-result\]\s+(\{.*\})/);
+  if (!match) return null;
+
+  try {
+    return JSON.parse(match[1]);
+  } catch {
+    return null;
+  }
+}
+
 app.use(express.json({limit: RUNTIME.jsonBodyLimit}));
 app.use(express.static(PATHS.publicDir));
 app.use("/video-shots", async (req, res, next) => {
   try {
-    const {videoShotsDir} = await loadAppRuntimeContext();
+    const {videoShotsDir} = await loadSelectedRuntimeContext();
     return express.static(videoShotsDir)(req, res, next);
   } catch (error) {
     return createJsonErrorResponse(res, error);
   }
 });
 
-/* -------------------------------------------------------------------------- */
-/* Generic utility helpers                                                    */
-/* -------------------------------------------------------------------------- */
-
 /**
- * Converts an unknown error value into a stable string.
- *
- * @param {unknown} error
- * @param {string} fallback
- * @returns {string}
+ * Returns all available `Project-*` folders for the project dropdown.
  */
-function toErrorMessage(error, fallback = "Unknown server error") {
-  return String(error?.message || error || fallback);
-}
-
-/**
- * Sends a standardized JSON error response.
- *
- * @param {import("express").Response} res
- * @param {unknown} error
- * @param {number} statusCode
- */
-function createJsonErrorResponse(res, error, statusCode = 500) {
-  res.status(statusCode).json({
-    ok: false,
-    error: toErrorMessage(error),
-  });
-}
-
-/**
- * Reads and parses one JSON file.
- *
- * @param {string} filePath
- * @returns {Promise<any>}
- */
-async function readJsonFile(filePath) {
-  const fileContents = await fs.readFile(filePath, "utf8");
-  return JSON.parse(fileContents);
-}
-
-/**
- * Writes one JSON file with stable pretty formatting.
- *
- * @param {string} filePath
- * @param {any} value
- * @returns {Promise<void>}
- */
-async function writeJsonFile(filePath, value) {
-  await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-}
-
-/**
- * Loads the app-level configuration from `config/config.json`.
- * This is the single source of truth for runtime paths and optional server
- * defaults such as the local port.
- *
- * @returns {Promise<any>}
- */
-async function loadAppConfig() {
-  return readJsonFile(PATHS.appConfigFile);
-}
-
-/**
- * Loads app config and resolves the configured runtime directory context.
- *
- * @returns {Promise<{appConfig: any, basePath: string, videoShotsDir: string}>}
- */
-async function loadAppRuntimeContext() {
+const getProjects = createAsyncJsonHandler(async () => {
   const appConfig = await loadAppConfig();
-  const basePath = normalizeBasePath(appConfig.base || "");
-  const videoShotsDir = resolveVideoShotsDir(basePath);
+  const projects = await listProjectDirectories(appConfig.base || "");
+  const runtimeContext = await loadSelectedRuntimeContext();
 
   return {
-    appConfig,
-    basePath,
-    videoShotsDir,
+    ok: true,
+    projects,
+    activeProject: runtimeContext.activeProject,
+    defaultProject: DEFAULT_PROJECT_NAME,
   };
-}
+}, "projects");
 
 /**
- * Combines stdout and stderr into one user-facing log string.
- *
- * @param {string} stdout
- * @param {string} stderr
- * @param {string} fallback
- * @returns {string}
+ * Selects one project folder as the active runtime project for the GUI.
+ * All later asset/config requests should resolve through this selection.
  */
-function buildCombinedOutput(stdout, stderr, fallback = "") {
-  return [stdout, stderr].filter(Boolean).join("\n\n") || fallback;
-}
+const postSelectProject = createAsyncJsonHandler(async (req) => {
+  const requestedProject = String(req.body?.project || "").trim();
 
-/**
- * Tries to parse JSON from child-process stdout.
- *
- * @param {string} stdout
- * @returns {any | null}
- */
-function parseJsonFromStdout(stdout) {
-  try {
-    return JSON.parse(stdout);
-  } catch {
-    return null;
-  }
-}
-
-/* -------------------------------------------------------------------------- */
-/* Video-config helpers                                                       */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Removes a trailing slash from the configured base path.
- *
- * @param {string} value
- * @returns {string}
- */
-function normalizeBasePath(value = "") {
-  return String(value).replace(/\/$/, "");
-}
-
-/**
- * Resolves the absolute shot-media directory from `config.base`.
- * The configured base directory is now the actual `video-shots` folder.
- *
- * @param {string} basePath
- * @returns {string}
- */
-function resolveVideoShotsDir(basePath) {
-  if (!basePath) {
-    throw new Error('config.json is missing required field "base".');
+  if (!requestedProject) {
+    throw new Error('Project selection payload is missing required field "project".');
   }
 
-  if (!path.isAbsolute(basePath)) {
-    throw new Error(
-      `config.base must be an absolute local filesystem path. Received: ${basePath}`
-    );
+  const appConfig = await loadAppConfig();
+  const projects = await listProjectDirectories(appConfig.base || "");
+
+  if (!projects.includes(requestedProject)) {
+    throw new Error(`Unknown project folder: ${requestedProject}`);
   }
 
-  return basePath;
-}
+  activeProjectName = requestedProject;
 
-/**
- * Resolves the absolute path to `video.config.json` based on `config.base`.
- *
- * @param {string} basePath
- * @returns {string}
- */
-function resolveVideoConfigPath(basePath) {
-  if (!basePath) {
-    throw new Error('config.json is missing required field "base".');
-  }
-
-  if (!path.isAbsolute(basePath)) {
-    throw new Error(
-      `config.base must be an absolute local filesystem path. Received: ${basePath}`
-    );
-  }
-
-  return path.join(basePath, "video.config.json");
-}
-
-/**
- * Resolves the server port from environment variables first and then from the
- * app configuration file. If neither is set, the built-in default is used.
- *
- * @param {any} appConfig
- * @returns {number}
- */
-function resolveRuntimePort(appConfig = {}) {
-  const envPort = Number(process.env.PORT || "");
-
-  if (Number.isFinite(envPort) && envPort > 0) {
-    return envPort;
-  }
-
-  const configPort = Number(appConfig.port);
-
-  if (Number.isFinite(configPort) && configPort > 0) {
-    return configPort;
-  }
-
-  return RUNTIME.defaultPort;
-}
-
-/**
- * Returns the normalized file name from one source path.
- *
- * @param {string} src
- * @returns {string}
- */
-function getFileNameFromSrc(src = "") {
-  return path.basename(String(src || ""));
-}
-
-/**
- * Returns whether a directory entry should be treated as an image asset.
- *
- * @param {string} fileName
- * @returns {boolean}
- */
-function isImageFile(fileName) {
-  const ext = path.extname(fileName).toLowerCase();
-  return IMAGE_EXTENSIONS.has(ext);
-}
-
-/**
- * Builds a stable fallback shot id from a file name.
- *
- * @param {string} fileName
- * @returns {string}
- */
-function buildFallbackShotId(fileName) {
-  const baseName = fileName.replace(/\.[^.]+$/, "");
-  const slug = baseName
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9-_]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "");
-
-  return slug ? `shot-${slug}` : "shot-unassigned";
-}
-
-/**
- * Normalizes one raw shot from `video.config.json` into a stable frontend shape.
- *
- * @param {Record<string, any>} shot
- * @param {number} index
- * @returns {{
- *   id: string,
- *   title: string,
- *   caption: string,
- *   duration: number,
- *   transition: string,
- *   zoom: number,
- *   pan: string,
- *   src: string,
- *   fileName: string,
- *   previewUrl: string,
- *   assigned: boolean,
- * }}
- */
-function normalizeConfiguredShot(shot, index) {
-  const fileName = getFileNameFromSrc(shot.src);
+  const runtimeContext = await loadSelectedRuntimeContext();
 
   return {
-    id: shot.id || buildFallbackShotId(fileName || `shot-${index + 1}`),
-    title: shot.title || shot.headline || fileName || `Shot ${index + 1}`,
-    caption: shot.caption || SHOT_DEFAULTS.caption,
-    duration: Number(shot.duration ?? shot.durationInFrames ?? SHOT_DEFAULTS.duration),
-    transition: shot.transition || SHOT_DEFAULTS.transition,
-    zoom: shot.zoom ?? SHOT_DEFAULTS.zoom,
-    pan: shot.pan || SHOT_DEFAULTS.pan,
-    src: shot.src || "",
-    fileName,
-    previewUrl: shot.previewUrl || toPreviewUrl(shot.src),
-    assigned: true,
+    ok: true,
+    activeProject: runtimeContext.activeProject,
+    videoShotsDir: runtimeContext.videoShotsDir,
   };
-}
-
-/**
- * Builds one unassigned asset entry from a file name in the shots directory.
- *
- * @param {string} fileName
- * @returns {{
- *   id: string,
- *   title: string,
- *   caption: string,
- *   duration: number,
- *   transition: string,
- *   zoom: number,
- *   pan: string,
- *   src: string,
- *   fileName: string,
- *   previewUrl: string,
- *   assigned: boolean,
- * }}
- */
-function buildUnassignedShot(fileName) {
-  return {
-    id: buildFallbackShotId(fileName),
-    title: "",
-    caption: SHOT_DEFAULTS.caption,
-    duration: SHOT_DEFAULTS.duration,
-    transition: SHOT_DEFAULTS.transition,
-    zoom: SHOT_DEFAULTS.zoom,
-    pan: SHOT_DEFAULTS.pan,
-    src: fileName,
-    fileName,
-    previewUrl: toPreviewUrl(fileName),
-    assigned: false,
-  };
-}
-
-/**
- * Returns app config and resolved video-config path information.
- *
- * @returns {Promise<{appConfig: any, basePath: string, videoShotsDir: string, videoConfigPath: string, videoConfig: any}>}
- */
-async function loadVideoConfigContext() {
-  const {appConfig, basePath, videoShotsDir} = await loadAppRuntimeContext();
-  const videoConfigPath = resolveVideoConfigPath(basePath);
-
-  let videoConfig;
-  try {
-    videoConfig = await readJsonFile(videoConfigPath);
-  } catch (error) {
-    if (/** @type {any} */ (error)?.code === "ENOENT") {
-      videoConfig = {shots: []};
-    } else {
-      throw error;
-    }
-  }
-
-  if (!Array.isArray(videoConfig.shots)) {
-    videoConfig.shots = [];
-  }
-
-  return {
-    appConfig,
-    basePath,
-    videoShotsDir,
-    videoConfigPath,
-    videoConfig,
-  };
-}
-
-/**
- * Reads all image file names from the shots directory.
- *
- * @returns {Promise<string[]>}
- */
-async function listShotImageFiles() {
-  const {videoShotsDir} = await loadVideoConfigContext();
-  const entries = await fs.readdir(videoShotsDir, {withFileTypes: true});
-
-  return entries
-    .filter((entry) => entry.isFile() && isImageFile(entry.name))
-    .map((entry) => entry.name)
-    .sort((a, b) => a.localeCompare(b, "de"));
-}
-
-/**
- * Loads configured shots from `video.config.json`.
- *
- * @returns {Promise<Array<any>>}
- */
-async function loadConfiguredShots() {
-  const {videoConfig} = await loadVideoConfigContext();
-  return videoConfig.shots.map(normalizeConfiguredShot);
-}
-
-/**
- * Loads all visible assets by merging configured shots with all image files
- * from the shot directory. Configured shots keep their order. Unassigned
- * images are appended afterward.
- *
- * @returns {Promise<Array<any>>}
- */
-async function loadMergedShots() {
-  const [configuredShots, imageFiles] = await Promise.all([
-    loadConfiguredShots(),
-    listShotImageFiles(),
-  ]);
-
-  const configuredByFileName = new Map(
-    configuredShots
-      .filter((shot) => shot.fileName)
-      .map((shot) => [shot.fileName, shot])
-  );
-
-  const unassignedShots = imageFiles
-    .filter((fileName) => !configuredByFileName.has(fileName))
-    .map(buildUnassignedShot);
-
-  return [...configuredShots, ...unassignedShots];
-}
-
-/**
- * Saves or updates one shot entry in `video.config.json`.
- * Existing shots are matched by file name.
- *
- * @param {Record<string, any>} input
- * @returns {Promise<any>}
- */
-async function saveShotConfig(input) {
-  const {videoConfigPath, videoConfig} = await loadVideoConfigContext();
-  const fileName = getFileNameFromSrc(input.src);
-
-  if (!fileName) {
-    throw new Error('Shot save payload is missing required field "src".');
-  }
-
-  const normalizedShot = {
-    id: input.id || buildFallbackShotId(fileName),
-    src: fileName,
-    title: input.title || input.headline || "",
-    headline: input.headline || input.title || "",
-    caption: input.caption || SHOT_DEFAULTS.caption,
-    duration: Number(input.duration ?? SHOT_DEFAULTS.duration),
-    transition: input.transition || SHOT_DEFAULTS.transition,
-    zoom: input.zoom ?? SHOT_DEFAULTS.zoom,
-    pan: input.pan || SHOT_DEFAULTS.pan,
-  };
-
-  const existingIndex = videoConfig.shots.findIndex(
-    (shot) => getFileNameFromSrc(shot.src) === fileName
-  );
-
-  if (existingIndex >= 0) {
-    videoConfig.shots[existingIndex] = {
-      ...videoConfig.shots[existingIndex],
-      ...normalizedShot,
-    };
-  } else {
-    videoConfig.shots.push(normalizedShot);
-  }
-
-  await writeJsonFile(videoConfigPath, videoConfig);
-
-  return normalizeConfiguredShot(normalizedShot, 0);
-}
-
-/* -------------------------------------------------------------------------- */
-/* Child-process helpers                                                      */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Collects stdout, stderr and exit code from one spawned child process.
- *
- * @param {import("node:child_process").ChildProcess} childProcess
- * @returns {Promise<{code: number | null, stdout: string, stderr: string}>}
- */
-function collectChildOutput(childProcess) {
-  return new Promise((resolve, reject) => {
-    let stdout = "";
-    let stderr = "";
-
-    childProcess.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-
-    childProcess.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-
-    childProcess.on("error", (error) => {
-      reject(error);
-    });
-
-    childProcess.on("close", (code) => {
-      resolve({
-        code,
-        stdout: stdout.trim(),
-        stderr: stderr.trim(),
-      });
-    });
-  });
-}
-
-/**
- * Creates one internal Node process for a local script.
- *
- * @param {string} scriptPath
- * @param {string[]} args
- * @returns {import("node:child_process").ChildProcess}
- */
-function createNodeProcess(scriptPath, args = []) {
-  return spawn(process.execPath, [scriptPath, ...args], {
-    cwd: __dirname,
-    env: process.env,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-}
-
-/**
- * Converts the preview-frame request body into CLI arguments for
- * `render-preview-frame.js`.
- *
- * @param {Record<string, any>} body
- * @returns {string[]}
- */
-function buildPreviewFrameArgs(body = {}) {
-  const args = [];
-
-  if (body.frame !== undefined) {
-    args.push(`--frame=${body.frame}`);
-  }
-
-  if (body.format) {
-    args.push(`--format=${body.format}`);
-  }
-
-  if (body.look) {
-    args.push(`--look=${body.look}`);
-  }
-
-  if (body.draft !== undefined) {
-    args.push(`--draft=${body.draft}`);
-  }
-
-  if (body.outputName) {
-    args.push(`--outputName=${body.outputName}`);
-  }
-
-  return args;
-}
-
-/* -------------------------------------------------------------------------- */
-/* Process runners                                                            */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Runs one internal script and returns the collected process output.
- *
- * @param {{
- *   scriptPath: string,
- *   args?: string[],
- *   successFallback: string,
- *   failureLabel: string,
- * }} options
- * @returns {Promise<{ok: true, output: string, stdout: string, stderr: string}>}
- */
-async function runProcessForTextResult({
-  scriptPath,
-  args = [],
-  successFallback,
-  failureLabel,
-}) {
-  const child = createNodeProcess(scriptPath, args);
-  const {code, stdout, stderr} = await collectChildOutput(child);
-  const output = buildCombinedOutput(stdout, stderr, successFallback);
-
-  if (code === 0) {
-    return {
-      ok: true,
-      output,
-      stdout,
-      stderr,
-    };
-  }
-
-  throw new Error(output || `${failureLabel} with code ${code}`);
-}
-
-/**
- * Runs the full video renderer.
- *
- * @returns {Promise<{ok: true, output: string, stdout: string, stderr: string}>}
- */
-async function runRenderProcess() {
-  return runProcessForTextResult({
-    scriptPath: PATHS.renderScript,
-    successFallback: "Render erfolgreich beendet.",
-    failureLabel: "Render failed",
-  });
-}
-
-/**
- * Runs the preview-frame renderer and parses the JSON payload from stdout.
- *
- * @param {Record<string, any>} requestBody
- * @returns {Promise<any>}
- */
-async function runPreviewFrameProcess(requestBody) {
-  const result = await runProcessForTextResult({
-    scriptPath: PATHS.previewFrameScript,
-    args: buildPreviewFrameArgs(requestBody),
-    successFallback: "Preview frame erfolgreich beendet.",
-    failureLabel: "Preview frame render failed",
-  });
-
-  const parsed = parseJsonFromStdout(result.stdout);
-
-  if (!parsed?.ok) {
-    throw new Error(result.output || "Preview frame renderer did not return valid JSON.");
-  }
-
-  return {
-    ...parsed,
-    output: result.output,
-  };
-}
-
-/* -------------------------------------------------------------------------- */
-/* Route handlers                                                             */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Wraps one async JSON route with uniform success/error behavior.
- *
- * @param {(req: import("express").Request) => Promise<any>} handler
- * @returns {(req: import("express").Request, res: import("express").Response) => Promise<void>}
- */
-function createAsyncJsonHandler(handler) {
-  return async (req, res) => {
-    try {
-      const result = await handler(req);
-      res.json(result);
-    } catch (error) {
-      createJsonErrorResponse(res, error);
-    }
-  };
-}
+}, "project-select");
 
 /**
  * Returns normalized audio metadata for the current project.
@@ -698,22 +377,19 @@ function createAsyncJsonHandler(handler) {
  * audio metadata payload so transient markers become available to the GUI.
  */
 const getAudioMetadataRoute = createAsyncJsonHandler(async () => {
-  await ensureMusicBeatsFile();
-  const data = await getAudioMetadata();
+  await ensureMusicBeatsFile(activeProjectName);
 
-  return {
-    ok: true,
-    hasAudio: Boolean(data?.hasAudio),
-    durationSeconds: Number(data?.audioDurationSeconds ?? 0),
-    beatCount: Number(data?.beatCount ?? 0),
-    transients: Array.isArray(data?.beatData?.transients)
-      ? data.beatData.transients
-      : [],
-    waveform: Array.isArray(data?.beatData?.waveform)
-      ? data.beatData.waveform
-      : [],
-  };
-});
+  const [data, {videoConfig}] = await Promise.all([
+    getAudioMetadata(activeProjectName),
+    loadVideoConfigContext(activeProjectName),
+  ]);
+
+  return createAudioMetadataResponse({
+    ...data,
+    beatSyncEnabled: videoConfig?.project?.beatSyncEnabled,
+    beatSyncStep: videoConfig?.project?.beatSyncStep,
+  });
+}, "audio-metadata");
 
 /**
  * Returns a compact health/debug payload so the GUI can verify server state.
@@ -723,7 +399,7 @@ const getAudioMetadataRoute = createAsyncJsonHandler(async () => {
  */
 async function getHealth(_req, res) {
   try {
-    const {appConfig, videoShotsDir} = await loadAppRuntimeContext();
+    const {appConfig, activeProject, videoShotsDir} = await loadSelectedRuntimeContext();
     const runtimePort = resolveRuntimePort(appConfig);
 
     res.json({
@@ -731,6 +407,7 @@ async function getHealth(_req, res) {
       port: runtimePort,
       publicDir: PATHS.publicDir,
       videoShotsDir,
+      activeProject,
       renderScript: PATHS.renderScript,
       previewFrameScript: PATHS.previewFrameScript,
       appConfigFile: PATHS.appConfigFile,
@@ -742,56 +419,123 @@ async function getHealth(_req, res) {
 }
 
 /**
- * Returns all visible shot assets: configured shots plus unassigned images
- * from the shot directory.
+ * Returns all visible shot assets plus the selected project's film metadata.
  */
 const getVideoConfig = createAsyncJsonHandler(async () => {
-  const shots = await loadMergedShots();
+  const [shots, {videoConfig, activeProject, videoShotsDir, videoConfigPath}] = await Promise.all([
+    loadMergedShots(activeProjectName),
+    loadVideoConfigContext(activeProjectName),
+  ]);
+  const csvArtifacts = await writeVideoConfigCsvArtifacts(activeProject, videoConfig);
 
   return {
     ok: true,
+    activeProject,
+    videoShotsDir,
+    videoConfigPath,
+    projectConfig: videoConfig,
     shots,
+    csvArtifacts,
   };
-});
+}, "video-config");
 
 /**
  * Saves one shot configuration entry to `video.config.json`.
  */
 const postVideoConfigShot = createAsyncJsonHandler(async (req) => {
-  const shot = await saveShotConfig(req.body || {});
+  const shot = await saveShotConfig(req.body || {}, activeProjectName);
 
   return {
     ok: true,
     shot,
   };
-});
+}, "video-config-shot");
+
+/**
+ * Saves project-level video metadata such as title, subtitle, layer color and outro text.
+ */
+const postVideoConfigProject = createAsyncJsonHandler(async (req) => {
+  const projectConfig = await saveProjectConfig(req.body || {}, activeProjectName);
+
+  return {
+    ok: true,
+    projectConfig,
+  };
+}, "video-config-project");
+
+/**
+ * Saves one complete `video.config.json` payload.
+ */
+const postVideoConfig = createAsyncJsonHandler(async (req) => {
+  const videoConfig = await saveVideoConfig(req.body || {}, activeProjectName);
+
+  return {
+    ok: true,
+    videoConfig,
+  };
+}, "video-config-save");
 
 /**
  * POST /api/render
  * Starts a full video render and returns the collected process output.
  */
-const postRender = createAsyncJsonHandler(async () => {
-  return runRenderProcess();
-});
+const postRender = createAsyncJsonHandler(async (req) => {
+  const result = await runRenderProcess({
+    ...(req.body || {}),
+    project: activeProjectName,
+  });
+  const renderArtifacts = extractRenderResultFromStdout(result?.stdout || "");
+
+  return {
+    ...result,
+    publicUrl: renderArtifacts?.publicRenderUrl || "",
+    csvUrl: renderArtifacts?.timelineCsvUrl || "",
+    renderArtifacts,
+  };
+}, "render");
 
 /**
  * POST /api/preview-frame
  * Starts one exact still-frame render and returns parsed preview metadata.
  */
 const postPreviewFrame = createAsyncJsonHandler(async (req) => {
-  return runPreviewFrameProcess(req.body);
-});
+  return runPreviewFrameProcess({
+    ...(req.body || {}),
+    project: activeProjectName,
+  });
+}, "preview-frame");
 
 /* -------------------------------------------------------------------------- */
 /* Routes                                                                     */
 /* -------------------------------------------------------------------------- */
 
+app.get("/api/projects", getProjects);
+app.post("/api/project/select", postSelectProject);
+
 app.get("/api/health", getHealth);
+
 app.get("/api/video-config", getVideoConfig);
+app.post("/api/video-config", postVideoConfig);
+app.post("/api/video-config/project", postVideoConfigProject);
 app.post("/api/video-config/shot", postVideoConfigShot);
+
+app.get("/api/audio-metadata", getAudioMetadataRoute);
+
 app.post("/api/render", postRender);
 app.post("/api/preview-frame", postPreviewFrame);
-app.get("/api/audio-metadata", getAudioMetadataRoute);
+
+/**
+ * Resets the public dev log file so each browser refresh starts with a clean
+ * log timeline.
+ */
+const postResetDevLog = createAsyncJsonHandler(async () => {
+  await resetDevLog();
+  await writeDevLog("log reset by browser refresh");
+
+  return {ok: true};
+}, "dev-log-reset");
+
+app.post("/api/dev-log/reset", postResetDevLog);
 
 /* -------------------------------------------------------------------------- */
 /* Server start                                                               */
@@ -802,14 +546,25 @@ app.get("/api/audio-metadata", getAudioMetadataRoute);
  */
 (async function startServer() {
   try {
-    const {appConfig} = await loadAppRuntimeContext();
+    const {appConfig} = await loadSelectedRuntimeContext();
     const port = resolveRuntimePort(appConfig);
 
     app.listen(port, () => {
-      console.log(`Server läuft auf http://localhost:${port}`);
+      console.log(`Bundle rebuildet - Server läuft auf http://localhost:${port}`);
+
+      writeDevLog(`Server läuft auf http://localhost:${port}`).catch(console.error);
     });
   } catch (error) {
-    console.error(`Serverstart fehlgeschlagen: ${toErrorMessage(error)}`);
+    const message = `Serverstart fehlgeschlagen: ${toErrorMessage(error)}`;
+
+    console.error(message);
+
+    try {
+      await writeDevLog(message);
+    } catch (logError) {
+      console.error("Logging failed:", logError);
+    }
+
     process.exit(1);
   }
 })();

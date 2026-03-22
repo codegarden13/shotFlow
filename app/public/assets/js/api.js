@@ -1,5 +1,5 @@
 /* ========================================================================== */
-/* api.js                                                                     */
+/* api.js   (api client)                                                                  */
 /* ========================================================================== */
 /*
  * Purpose
@@ -25,10 +25,14 @@
  * - Refactored module into generic helpers, payload helpers and endpoint calls
  * - Added GET helper for future metadata endpoints
  * - Kept public exports minimal and explicit for `index.js`
+ *
+ * 2026-03-21
+ * - Extended `requestAudioMetadata()` to map beat-sync UI fields from the backend
  */
 /* ========================================================================== */
 
 import {dom} from "./dom.js";
+//import {buildDefaultProjectTitle} from "./video-config-shape.js";
 
 /* -------------------------------------------------------------------------- */
 /* Generic request helpers                                                    */
@@ -57,6 +61,7 @@ async function parseJsonResponse(response, url) {
  * @param {string} url
  * @param {RequestInit} [options]
  * @returns {Promise<any>}
+ * //TODO:prüfen ob sich daraus ein graph für analyse bauen lässt was wir die oft aufgerufen
  */
 async function requestJson(url, options = {}) {
   const response = await fetch(url, options);
@@ -91,7 +96,7 @@ async function postJson(url, payload) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Request payload helpers                                                    */
+/* UI-derived request payload helpers                                         */
 /* -------------------------------------------------------------------------- */
 
 /**
@@ -112,13 +117,12 @@ export function buildRenderOptions() {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Loads the normalized shot list from the backend.
+ * Loads shot and project-config data for the active project.
  *
- * @returns {Promise<any[]>}
+ * @returns {Promise<any>}
  */
 export async function requestVideoConfig() {
-  const data = await getJson("/api/video-config");
-  return Array.isArray(data.shots) ? data.shots : [];
+  return getJson("/api/video-config");
 }
 
 /**
@@ -135,6 +139,12 @@ export async function requestAudioMetadata() {
     beatCount: Number(data?.beatCount ?? 0),
     transients: Array.isArray(data?.transients) ? data.transients : [],
     waveform: Array.isArray(data?.waveform) ? data.waveform : [],
+    filename: String(data?.filename || "music.mp3"),
+    beatsFilename: String(data?.beatsFilename || "music-beats.json"),
+    beatSyncEnabled: Boolean(data?.beatSyncEnabled),
+    beatSyncStep: Number(data?.beatSyncStep ?? 1),
+    beatSyncActive: Boolean(data?.beatSyncActive),
+    loopMode: String(data?.loopMode || "Loop / frei"),
   };
 }
 
@@ -166,4 +176,43 @@ export async function requestPreviewFrame(payload) {
  */
 export async function requestVideoRender(payload) {
   return postJson("/api/render", payload);
+}
+
+/**
+ * Loads all selectable project folders for the project dropdown.
+ *
+ * @returns {Promise<any>}
+ */
+export async function requestProjects() {
+  return getJson("/api/projects");
+}
+
+/**
+ * Selects one project as the active backend runtime project.
+ *
+ * @param {string} project
+ * @returns {Promise<any>}
+ */
+export async function requestSelectProject(project) {
+  return postJson("/api/project/select", {project});
+}
+
+/**
+ * Saves project-level video metadata for the active project.
+ *
+ * @param {Record<string, any>} payload
+ * @returns {Promise<any>}
+ */
+export async function requestSaveProjectConfig(payload) {
+  return postJson("/api/video-config/project", payload);
+}
+
+/**
+ * Saves one complete `video.config.json` payload for the active project.
+ *
+ * @param {{project?: any, shots?: any[]}|Record<string, any>} payload
+ * @returns {Promise<any>}
+ */
+export async function requestSaveVideoConfig(payload) {
+  return postJson("/api/video-config", payload);
 }

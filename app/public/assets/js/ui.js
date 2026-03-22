@@ -31,8 +31,9 @@
  */
 /* ========================================================================== */
 
-import {state} from "./state.js";
+import {state, UI_TEXT} from "./state.js";
 import {dom} from "./dom.js";
+import { updateInspectorInfo } from "./project-inspector.js";
 
 /* -------------------------------------------------------------------------- */
 /* Status and output helpers                                                  */
@@ -171,21 +172,46 @@ export function setSelectionInfo(text) {
 }
 
 /**
- * Shows or hides the JSON editor.
+ * Opens one right-sidebar Bootstrap tab if the Bootstrap Tab API is available.
+ * Fails silently when Bootstrap is not loaded or the target tab is missing.
+ *
+ * @param {HTMLElement | null | undefined} tabElement
+ */
+function openRightSidebarTab(tabElement) {
+  if (!tabElement) return;
+
+  const bootstrapTabApi = window.bootstrap?.Tab;
+  if (!bootstrapTabApi?.getOrCreateInstance) return;
+
+  bootstrapTabApi.getOrCreateInstance(tabElement).show();
+}
+
+/**
+ * Shows or hides the JSON editor and keeps the right-sidebar tab selection in sync.
+ * When the editor is shown, the "Gewählte Section" tab must become active.
  *
  * @param {boolean} isVisible
  */
 export function toggleJsonEditor(isVisible) {
   dom.jsonEditor?.classList.toggle("d-none", !isVisible);
+
+  if (isVisible) {
+    openRightSidebarTab(dom.selectedSectionTab);
+  }
 }
 
 /**
  * Shows or hides the segment placeholder.
+ * When the placeholder is shown, the Clip tab should become active again.
  *
  * @param {boolean} isVisible
  */
 export function toggleVideoPlaceholder(isVisible) {
   dom.videoPlaceholder?.classList.toggle("d-none", !isVisible);
+
+  if (isVisible) {
+    openRightSidebarTab(dom.clipTab);
+  }
 }
 
 /**
@@ -199,11 +225,39 @@ export function setJsonFileName(fileName) {
 }
 
 /**
+ * Fills the JSON editor form with metadata for one selected asset.
+ *
+ * @param {{json?: Record<string, any>}} asset
+ */
+export function fillJsonForm(asset) {
+  const json = asset?.json && typeof asset.json === "object" ? asset.json : {};
+  if (!Object.keys(json).length) return;
+
+  if (dom.fieldSrc) dom.fieldSrc.value = json.src;
+  if (dom.fieldTitle) dom.fieldTitle.value = json.title;
+  if (dom.fieldDuration) dom.fieldDuration.value = json.duration ?? json.durationSeconds ?? "";
+  if (dom.fieldTransition) dom.fieldTransition.value = json.transition;
+  if (dom.fieldZoom) dom.fieldZoom.value = json.zoom;
+  if (dom.fieldPan) dom.fieldPan.value = json.pan;
+  if (dom.fieldCaption) dom.fieldCaption.value = json.caption;
+}
+
+/**
+ * Builds one selection label for the currently opened asset editor.
+ *
+ * @param {{fileName?: string}} asset
+ * @returns {string}
+ */
+export function buildAssetSelectionInfo(asset) {
+  return `Bild: ${asset?.fileName || ""}`;
+}
+
+/**
  * Writes the current video title value into the sidebar field.
  *
  * @param {string} value
  */
-export function setVideoTitleInput(value) {
+function setVideoTitleInput(value) {
   state.videoTitle = value;
 
   if (!dom.videoTitleInput) return;
@@ -215,9 +269,129 @@ export function setVideoTitleInput(value) {
  *
  * @param {string} value
  */
-export function setVideoSubtitleInput(value) {
+function setVideoSubtitleInput(value) {
   state.videoSubtitle = value;
 
   if (!dom.videoSubtitleInput) return;
   dom.videoSubtitleInput.value = value;
+}
+
+/**
+ * Returns the normalized sidebar title value.
+ *
+ * @returns {string}
+ */
+function getPendingVideoTitle() {
+  return String(dom.videoTitleInput?.value || "").trim();
+}
+
+/**
+ * Returns the normalized sidebar subtitle value.
+ *
+ * @returns {string}
+ */
+function getPendingVideoSubtitle() {
+  return String(dom.videoSubtitleInput?.value || "").trim();
+}
+
+/**
+ * Applies the current video title in local UI state only.
+ */
+export function applyVideoTitle() {
+  const nextValue = getPendingVideoTitle();
+
+  if (!nextValue) {
+    setStatus(UI_TEXT.videoTitleMissing, true);
+    return;
+  }
+
+  setVideoTitleInput(nextValue);
+  updateInspectorInfo();
+  setStatus(UI_TEXT.videoTitleSaved);
+  setOutput(`Video Title: ${nextValue}`);
+}
+
+/**
+ * Applies the current video subtitle in local UI state only.
+ */
+export function applyVideoSubtitle() {
+  const nextValue = getPendingVideoSubtitle();
+
+  if (!nextValue) {
+    setStatus(UI_TEXT.videoSubtitleMissing, true);
+    return;
+  }
+
+  setVideoSubtitleInput(nextValue);
+  updateInspectorInfo();
+  setStatus(UI_TEXT.videoSubtitleSaved);
+  setOutput(`Video Subtitle: ${nextValue}`);
+}
+
+/**
+ * Applies a reduced log strategy for the full video render.
+ * Only start and finish messages remain in the left log panel.
+ *
+ * @param {string} phase
+ */
+export function setVideoRenderLogPhase(phase) {
+  if (phase === "start") {
+    setOutput("Videorendering gestartet.");
+    return;
+  }
+
+  if (phase === "success") {
+    setOutput("Videorendering abgeschlossen.");
+    return;
+  }
+
+  if (phase === "error") {
+    setOutput("Videorendering fehlgeschlagen.");
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* GUI action pipelines                                                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Applies the success state of one GUI action.
+ *
+ * @param {string} successMessage
+ * @param {any} result
+ * @param {(result: any) => void | undefined} onSuccess
+ */
+export function finalizeGuiActionSuccess(successMessage, result, onSuccess) {
+  if (typeof onSuccess === "function") {
+    onSuccess(result);
+  }
+
+  setStatus(successMessage);
+
+  if (result !== undefined) {
+    setOutput(result?.output || result?.publicUrl || `${successMessage}.`);
+    return;
+  }
+
+  setOutput(`${successMessage}.`);
+}
+
+/**
+ * Applies the error state of one GUI action.
+ *
+ * @param {string} actionName
+ * @param {unknown} error
+ */
+export function finalizeGuiActionError(actionName, error) {
+  setStatus(`${actionName} fehlgeschlagen`, true);
+  setOutput(String(error?.message || error));
+}
+
+/**
+ * Resets the runtime state after one GUI action.
+ */
+export function resetGuiActionState() {
+  state.isRequestRunning = false;
+  state.activeAction = null;
+  syncActionButtonsState();
 }

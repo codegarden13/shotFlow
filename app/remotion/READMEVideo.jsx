@@ -15,22 +15,25 @@
  * Runtime model
  * -------------
  * - Media files are loaded from bundled static assets in `public/video-shots`
- * - Shot timing is derived from per-shot `duration`
- * - Headline, caption and zoom are taken from JSON
- * - Intro and outro use fixed frame durations from `TIMING`
+ * - Scene timing is prepared in `build-video-runtime.js`
+ * - Shot scenes already contain start/duration frames and transition metadata
+ * - Headline, caption and zoom are taken from the normalized runtime model
+ * - The JSX renderer focuses on presentation instead of timeline calculation
  *
  * Expected input props
  * --------------------
  * {
- *   title?: string,
- *   subtitle?: string,
- *   intro?: {
+ *   project?: {
  *     title?: string,
  *     subtitle?: string,
- *     background?: any,
- *     layout?: any,
- *     titleAnimation?: any,
- *     subtitleAnimation?: any
+ *     introText?: string,
+ *     introDurationSeconds?: number,
+ *     audioStartSeconds?: number,
+ *     musicVolume?: number,
+ *     layerColor?: string,
+ *     outroText?: string,
+ *     outroDurationSeconds?: number,
+ *     fps?: number
  *   },
  *   shots?: Array<{
  *     id?: string,
@@ -39,11 +42,12 @@
  *     headline?: string,
  *     caption?: string,
  *     captionAnimation?: any,
- *     duration?: number,
+ *     transition?: string,
+ *     durationFrames?: number,
  *     durationInFrames?: number,
+ *     startFrame?: number,
  *     zoom?: number
- *   }>,
- *   outroText?: string
+ *   }>
  * }
  *
  * Design decisions
@@ -53,24 +57,11 @@
  * - Use Remotion bundled static assets as the media access mechanism
  * - Keep shot defaults local to this module
  *
- * Change log
- * ----------
- * 2026-03-14
- * - Refactored composition to use bundled `public/video-shots` assets via `staticFile()`
- * - Removed runtime URL-based media access from JSX
- * - Reintroduced local shot defaults for duration / zoom / text fields
- * - Simplified media loading to align with Express static routing
- * - Standardized section comments and function headers
- * - Refactored intro and shot helpers into clearer config-driven accessors
- * - Added JSON-driven shot caption animation support with stable fallbacks
- * - Added JSON-driven intro background image and overlay support
- *
  * Notes for future work
  * ---------------------
- * - Add transition presets driven by JSON
- * - Add layout presets per shot
- * - Add beat-sync using `music-beats.json`
- * - Move scene variants into a registry-based composition system
+ * - Add true overlapping crossfades between adjacent shot scenes
+ * - Move scene variants into a registry-based template system
+ * - Keep extending the runtime model instead of reintroducing timing logic here
  */
 /* ========================================================================== */
 
@@ -84,6 +75,7 @@ import {
   useVideoConfig,
 } from "remotion";
 import {Audio} from "@remotion/media";
+import {buildVideoRuntime} from "../lib/video/build-video-runtime.js";
 import "../public/assets/css/video-template.css";
 
 /* -------------------------------------------------------------------------- */
@@ -115,23 +107,131 @@ const OPACITY = {
   caption: 0.9,
 };
 
-const TIMING = {
-  intro: 60,
-  outro: 60,
+const VIDEO_DEFAULTS = {
+  timing: {
+    introFrames: 60,
+    outroFrames: 60,
+  },
+  shot: {
+    durationFrames: 90,
+    zoom: 1,
+    caption: "",
+    headline: "",
+  },
+  music: {
+    src: "music.mp3",
+    volume: 0.18,
+  },
+  transition: {
+    type: "cut",
+    frames: 10,
+    minFrames: 4,
+  },
 };
+/**
+ * Returns the canonical default transition config.
+ *
+ * @returns {{type: string, frames: number, minFrames: number}}
+ */
+function getTransitionDefaults() {
+  return VIDEO_DEFAULTS.transition;
+}
+/**
+ * Returns the canonical default timing config.
+ *
+ * @returns {{introFrames: number, outroFrames: number}}
+ */
+function getTimingDefaults() {
+  return VIDEO_DEFAULTS.timing;
+}
 
-const SHOT_DEFAULTS = {
-  duration: 90,
-  zoom: 1,
-  caption: "",
-  headline: "",
-};
+/**
+ * Returns the canonical default shot config.
+ *
+ * @returns {{durationFrames: number, zoom: number, caption: string, headline: string}}
+ */
+function getShotDefaults() {
+  return VIDEO_DEFAULTS.shot;
+}
 
-const MUSIC_DEFAULTS = {
-  src: "music.mp3",
-  volume: 0.18,
-  fadeDuration: 20,
-};
+/**
+ * Returns the canonical default music config.
+ *
+ * @returns {{src: string, volume: number}}
+ */
+function getMusicDefaults() {
+  return VIDEO_DEFAULTS.music;
+}
+
+/**
+ * Returns canonical props in one stable shape for local helpers.
+ *
+ * @param {any} props
+ * @returns {{project: any, shots: any[]}}
+ */
+function getCanonicalVideoConfig(props = {}) {
+  return {
+    project: {
+      ...(props?.project || {}),
+    },
+    shots: Array.isArray(props?.shots) ? props.shots : [],
+  };
+}
+
+
+/**
+ * Returns the canonical runtime model for rendering.
+ *
+ * The runtime builder centralizes scene timing, transition defaults and
+ * beat-synced shot preparation so the JSX layer can stay presentation-focused.
+ *
+ * @param {any} props
+ * @returns {{composition: any, introScene: any, shotScenes: any[], outroScene: any, audio: {beatData: any}}}
+ */
+function getVideoRuntime(props = {}) {
+  const canonicalVideoConfig = getCanonicalVideoConfig(props);
+  return buildVideoRuntime(canonicalVideoConfig, props?.beatData || {});
+}
+
+/**
+ * Returns the mapped composition derived from the canonical runtime model.
+ *
+ * @param {any} props
+ * @returns {any}
+ */
+function getMappedConfig(props = {}) {
+  return getVideoRuntime(props)?.composition || null;
+}
+
+/**
+ * Returns one stable project object for rendering text scenes.
+ *
+ * Title/subtitle/intro text may arrive either via canonical `project.*`
+ * or via mapped `composition.*`. Rendering prefers mapped composition text
+ * when present and falls back to canonical project values.
+ *
+ * @param {any} props
+ * @returns {any}
+ */
+function getRenderProject(props = {}) {
+  const canonicalVideoConfig = getCanonicalVideoConfig(props);
+  const composition = getMappedConfig(props) || {};
+  const canonicalProject = canonicalVideoConfig.project || {};
+
+  return {
+    ...canonicalProject,
+    title: String(composition?.title ?? canonicalProject?.title ?? ""),
+    subtitle: String(composition?.subtitle ?? canonicalProject?.subtitle ?? ""),
+    introText: String(composition?.introText ?? canonicalProject?.introText ?? ""),
+    audioStartSeconds: Number(canonicalProject?.audioStartSeconds ?? 0),
+    musicVolume: Number(canonicalProject?.musicVolume ?? composition?.musicVolume ?? VIDEO_DEFAULTS.music.volume),
+    targetDurationSeconds: Number(
+      canonicalProject?.targetDurationSeconds ?? composition?.targetDurationSeconds ?? 0,
+    ),
+    outroText: String(composition?.outroText ?? canonicalProject?.outroText ?? ""),
+    layerColor: String(composition?.layerColor ?? canonicalProject?.layerColor ?? ""),
+  };
+}
 
 /* -------------------------------------------------------------------------- */
 /* Media URL helpers                                                          */
@@ -154,28 +254,6 @@ const buildMediaUrl = (fileName) => staticFile(`video-shots/${fileName}`);
  * @returns {string}
  */
 const getMediaFileName = (fileName, fallback) => fileName || fallback;
-
-/**
- * Returns the effective intro configuration object.
- * The composition currently keeps backward compatibility with top-level
- * `title` and `subtitle` while allowing future migration to `intro.*`.
- *
- * @param {{title?: string, subtitle?: string, intro?: any}} props
- * @returns {{title?: string, subtitle?: string, background?: any, layout?: any, titleAnimation?: any, subtitleAnimation?: any}}
- */
-
-function getIntroConfig(props = {}) {
-  const intro = props?.intro || {};
-
-  return {
-    title: intro.title ?? props.title,
-    subtitle: intro.subtitle ?? props.subtitle,
-    background: intro.background || {},
-    layout: intro.layout || {},
-    titleAnimation: intro.titleAnimation || {},
-    subtitleAnimation: intro.subtitleAnimation || {},
-  };
-}
 
 /**
  * Returns a normalized intro layout configuration.
@@ -205,6 +283,42 @@ function getIntroBackgroundConfig(background = {}) {
     position: background?.position || "center center",
     overlayColor: background?.overlayColor || "transparent",
     overlayOpacity: Number(background?.overlayOpacity ?? 0),
+  };
+}
+
+/**
+ * Returns the intro background config derived from canonical project props.
+ *
+ * @param {any} project
+ * @returns {{image: string, size: string, position: string, overlayColor: string, overlayOpacity: number}}
+ */
+function getProjectIntroBackgroundConfig(project = {}) {
+  return getIntroBackgroundConfig({
+    overlayColor: String(project?.layerColor || "transparent"),
+    overlayOpacity: 0.45,
+    image: "",
+    size: "cover",
+    position: "center center",
+  });
+}
+
+/**
+ * Returns stable intro animation presets.
+ *
+ * @returns {{titleAnimation: any, subtitleAnimation: any}}
+ */
+function getProjectIntroAnimations() {
+  return {
+    titleAnimation: {
+      from: {x: -140, y: 24, opacity: 0, letterSpacing: 6},
+      to: {x: 0, y: 0, opacity: 1, letterSpacing: 0},
+      frames: [0, 24],
+    },
+    subtitleAnimation: {
+      from: {x: 90, y: 12, opacity: 0, letterSpacing: 3},
+      to: {x: 0, y: 0, opacity: 1, letterSpacing: 0},
+      frames: [8, 40],
+    },
   };
 }
 
@@ -248,7 +362,7 @@ function getIntroAnimationConfig(animation, fallbackFrom, fallbackTo, fallbackFr
  * @returns {string}
  */
 const getShotHeadline = (shot) =>
-  shot?.headline || shot?.title || SHOT_DEFAULTS.headline;
+  shot?.headline || shot?.title || getShotDefaults().headline;
 
 /**
  * Returns the effective caption for one shot.
@@ -256,7 +370,7 @@ const getShotHeadline = (shot) =>
  * @param {any} shot
  * @returns {string}
  */
-const getShotCaption = (shot) => shot?.caption || SHOT_DEFAULTS.caption;
+const getShotCaption = (shot) => shot?.caption || getShotDefaults().caption;
 
 /**
  * Returns the normalized caption animation config for one shot.
@@ -302,7 +416,7 @@ function getShotCaptionAnimationConfig(shot) {
  * @param {any} shot
  * @returns {number}
  */
-const getShotZoom = (shot) => Number(shot?.zoom ?? SHOT_DEFAULTS.zoom);
+const getShotZoom = (shot) => Number(shot?.zoom ?? getShotDefaults().zoom);
 
 /**
  * Returns the effective source file name for one shot.
@@ -313,59 +427,310 @@ const getShotZoom = (shot) => Number(shot?.zoom ?? SHOT_DEFAULTS.zoom);
 const getShotSource = (shot) => shot?.src || "";
 
 /**
- * Returns the effective outro text.
- *
- * @param {{outroText?: string}} props
- * @returns {string | undefined}
- */
-function getOutroText(props = {}) {
-  return props?.outroText;
-}
-
-/* -------------------------------------------------------------------------- */
-/* Timing helpers                                                             */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Returns the effective duration of one shot in frames.
+ * Returns the normalized transition preset for one shot.
  *
  * @param {any} shot
- * @returns {number}
+ * @returns {string}
  */
-const getShotDuration = (shot) =>
-  Number(shot?.duration ?? shot?.durationInFrames ?? SHOT_DEFAULTS.duration);
+function getShotTransition(shot) {
+  return String(shot?.transition || getTransitionDefaults().type).toLowerCase();
+}
 
 /**
- * Returns the timeline start frame for one shot.
+ * Returns the effective transition length for one shot.
  *
- * @param {any[]} shots
+ * Short shots automatically receive shorter transitions so fade/zoom animation
+ * stays visible without consuming most of the shot runtime.
+ *
+ * @param {number} durationInFrames
+ * @returns {number}
+ */
+function getShotTransitionFrames(durationInFrames) {
+  const transitionDefaults = getTransitionDefaults();
+  const safeDuration = Math.max(0, Number(durationInFrames) || 0);
+  const proportionalFrames = Math.floor(safeDuration * 0.18);
+
+  return Math.max(
+    transitionDefaults.minFrames,
+    Math.min(transitionDefaults.frames, proportionalFrames || transitionDefaults.frames),
+  );
+}
+
+/**
+ * Returns visible transition animation values for one shot.
+ *
+ * `cut` keeps the previous hard-cut behavior.
+ * `fade` fades in and out inside the shot sequence.
+ * `zoom` adds a stronger punch-in / settle movement near the sequence edges.
+ *
+ * @param {number} frame
+ * @param {any} shot
+ * @param {number} durationInFrames
+ * @returns {{opacity: number, transitionScaleOffset: number}}
+ */
+function getShotTransitionState(frame, shot, durationInFrames) {
+  const transition = getShotTransition(shot);
+  const transitionFrames = getShotTransitionFrames(durationInFrames);
+  const endStartFrame = Math.max(0, durationInFrames - transitionFrames);
+
+  if (transition === "fade") {
+    const fadeInOpacity = interpolate(frame, [0, transitionFrames], [0, 1], {
+      extrapolateLeft: "clamp",
+      extrapolateRight: "clamp",
+    });
+    const fadeOutOpacity = interpolate(
+      frame,
+      [endStartFrame, durationInFrames],
+      [1, 0],
+      {
+        extrapolateLeft: "clamp",
+        extrapolateRight: "clamp",
+      },
+    );
+
+    return {
+      opacity: Math.min(fadeInOpacity, fadeOutOpacity),
+      transitionScaleOffset: 0,
+    };
+  }
+
+  if (transition === "zoom") {
+    const enterScaleOffset = interpolate(frame, [0, transitionFrames], [0.12, 0], {
+      extrapolateLeft: "clamp",
+      extrapolateRight: "clamp",
+    });
+    const exitScaleOffset = interpolate(
+      frame,
+      [endStartFrame, durationInFrames],
+      [0, 0.08],
+      {
+        extrapolateLeft: "clamp",
+        extrapolateRight: "clamp",
+      },
+    );
+    const enterOpacity = interpolate(frame, [0, transitionFrames], [0.8, 1], {
+      extrapolateLeft: "clamp",
+      extrapolateRight: "clamp",
+    });
+    const exitOpacity = interpolate(
+      frame,
+      [endStartFrame, durationInFrames],
+      [1, 0.92],
+      {
+        extrapolateLeft: "clamp",
+        extrapolateRight: "clamp",
+      },
+    );
+
+    return {
+      opacity: Math.min(enterOpacity, exitOpacity),
+      transitionScaleOffset: enterScaleOffset + exitScaleOffset,
+    };
+  }
+
+  return {
+    opacity: 1,
+    transitionScaleOffset: 0,
+  };
+}
+
+/**
+ * Builds one compact render-debug payload for a prepared runtime shot.
+ *
+ * Runtime shots already contain canonical timing values from `buildVideoRuntime`,
+ * so debug output should read `startFrame` and `durationInFrames` directly from
+ * the prepared shot scene instead of recalculating timeline positions.
+ *
+ * @param {any} shot
  * @param {number} index
- * @returns {number}
+ * @param {number} introDurationFrames
+ * @returns {{
+ *   id: string,
+ *   src: string,
+ *   startFrame: number,
+ *   durationFrames: number,
+ *   endFrame: number,
+ * }}
  */
-const getShotStart = (shots, index) => {
-  const durationBefore = shots
-    .slice(0, index)
-    .reduce((sum, shot) => sum + getShotDuration(shot), 0);
+function getShotRenderDebugEntry(shot, index, introDurationFrames) {
+  const startFrame = Number(shot?.startFrame ?? introDurationFrames);
+  const durationFrames = Number(shot?.durationInFrames ?? shot?.durationFrames ?? 0);
 
-  return TIMING.intro + durationBefore;
-};
+  return {
+    id: String(shot?.id || `shot-${index + 1}`),
+    src: String(getShotSource(shot) || ""),
+    startFrame,
+    durationFrames,
+    endFrame: startFrame + durationFrames,
+  };
+}
 
 /**
- * Returns the total duration of all shots.
+ * Formats one frame count as seconds for render/debug output.
  *
- * @param {any[]} shots
+ * @param {number} frames
+ * @param {number} fps
  * @returns {number}
  */
-const getTotalShotsDuration = (shots) =>
-  shots.reduce((sum, shot) => sum + getShotDuration(shot), 0);
+function framesToSeconds(frames, fps) {
+  const safeFps = Number(fps) || 30;
+  return Number((Number(frames || 0) / safeFps).toFixed(2));
+}
+
+
 
 /**
- * Returns the outro start frame.
+ * Builds one compact input/debug payload for a raw canonical shot.
  *
- * @param {any[]} shots
- * @returns {number}
+ * @param {any} shot
+ * @param {number} index
+ * @returns {{
+ *   id: string,
+ *   src: string,
+ *   durationSeconds: number,
+ *   title: string,
+ *   caption: string,
+ *   zoom: number,
+ * }}
  */
-const getOutroStart = (shots) => TIMING.intro + getTotalShotsDuration(shots);
+function getShotInputDebugEntry(shot, index) {
+  return {
+    id: String(shot?.id || `shot-${index + 1}`),
+    src: String(shot?.src || ""),
+    durationSeconds: Number(shot?.durationSeconds ?? 0),
+    title: String(shot?.title || shot?.headline || ""),
+    caption: String(shot?.caption || ""),
+    zoom: Number(shot?.zoom ?? getShotDefaults().zoom),
+  };
+}
+
+/**
+ * Builds one compact project-level debug payload from canonical JSON input.
+ *
+ * @param {any} project
+ * @returns {{
+ *   title: string,
+ *   subtitle: string,
+ *   introText: string,
+ *   audioStartSeconds: number,
+ *   musicVolume: number,
+ *   outroText: string,
+ *   layerColor: string,
+ *   aspectRatio: string,
+ *   width: string | number,
+ *   fps: number,
+ *   targetDurationSeconds: number,
+ *   beatSyncEnabled: boolean,
+ *   beatSyncStep: number,
+ * }}
+ */
+function getProjectInputDebugEntry(project) {
+  return {
+    title: String(project?.title || ""),
+    subtitle: String(project?.subtitle || ""),
+    introText: String(project?.introText || ""),
+    audioStartSeconds: Number(project?.audioStartSeconds ?? 0),
+    musicVolume: Number(project?.musicVolume ?? VIDEO_DEFAULTS.music.volume),
+    outroText: String(project?.outroText || ""),
+    layerColor: String(project?.layerColor || ""),
+    aspectRatio: String(project?.aspectRatio || ""),
+    width: project?.width ?? "",
+    fps: Number(project?.fps ?? 0),
+    targetDurationSeconds: Number(project?.targetDurationSeconds ?? 0),
+    introDurationSeconds: project?.introDurationSeconds ?? "",
+    outroDurationSeconds: project?.outroDurationSeconds ?? "",
+    beatSyncEnabled: Boolean(project?.beatSyncEnabled ?? true),
+    beatSyncStep: Number(project?.beatSyncStep ?? 1),
+  };
+}
+
+/**
+ * Builds one fachlicher Render-Log payload so development logs can show both
+ * canonical JSON input and the derived runtime values used by Remotion.
+ *
+ * @param {{project?: any, shots?: any[]}} props
+ * @param {any[]} shots
+ * @returns {{
+ *   input: {
+ *     project: any,
+ *     shots: any[],
+ *   },
+ *   derived: {
+ *     composition: any,
+ *     introFrames: number,
+ *     outroFrames: number,
+ *     shots: any[],
+ *   },
+ * }}
+ */
+function getRenderDebugPayload(props, shots) {
+  const canonicalVideoConfig = getCanonicalVideoConfig(props);
+  const renderProject = getRenderProject(props);
+  const inputProject = getProjectInputDebugEntry(renderProject);
+  const inputShots = Array.isArray(canonicalVideoConfig.shots)
+    ? canonicalVideoConfig.shots.map((shot, index) => getShotInputDebugEntry(shot, index))
+    : [];
+  const runtime = getVideoRuntime(props);
+  const mappedComposition = runtime?.composition || null;
+  const compositionFps = Number(runtime?.composition?.fps ?? props?.project?.fps ?? 30);
+  const introDurationFrames = Number(runtime?.introScene?.durationFrames ?? 0);
+  const outroDurationFrames = Number(runtime?.outroScene?.durationFrames ?? 0);
+  const derivedShots = shots.map((shot, index) => {
+    const debugEntry = getShotRenderDebugEntry(shot, index, introDurationFrames);
+
+    return {
+      ...debugEntry,
+      startSeconds: framesToSeconds(debugEntry.startFrame, compositionFps),
+      durationSeconds: framesToSeconds(debugEntry.durationFrames, compositionFps),
+      endSeconds: framesToSeconds(debugEntry.endFrame, compositionFps),
+    };
+  });
+
+  const totalShotsDuration = shots.reduce(
+    (sum, shot) => sum + (Number(shot?.durationInFrames ?? shot?.durationFrames) || 0),
+    0,
+  );
+  const outroStart = Number(runtime?.outroScene?.startFrame ?? introDurationFrames + totalShotsDuration);
+  const totalDuration = outroStart + outroDurationFrames;
+
+  return {
+    input: {
+      project: inputProject,
+      shots: inputShots,
+    },
+    derived: {
+      composition: mappedComposition,
+      fps: compositionFps,
+      introFrames: introDurationFrames,
+      introSeconds: framesToSeconds(introDurationFrames, compositionFps),
+      outroFrames: outroDurationFrames,
+      outroSeconds: framesToSeconds(outroDurationFrames, compositionFps),
+      totalShotsDuration,
+      totalShotsDurationSeconds: framesToSeconds(totalShotsDuration, compositionFps),
+      outroStartFrame: outroStart,
+      outroStartSeconds: framesToSeconds(outroStart, compositionFps),
+      totalDurationFrames: totalDuration,
+      totalDurationSeconds: framesToSeconds(totalDuration, compositionFps),
+      shots: derivedShots,
+    },
+  };
+}
+
+function logRenderDebugOnce(payload) {
+  const scope = typeof globalThis !== "undefined" ? globalThis : window;
+  const payloadKey = JSON.stringify(payload);
+
+  if (!Array.isArray(scope.__README_VIDEO_RENDER_DEBUG_LOGGED_KEYS__)) {
+    scope.__README_VIDEO_RENDER_DEBUG_LOGGED_KEYS__ = [];
+  }
+
+  if (scope.__README_VIDEO_RENDER_DEBUG_LOGGED_KEYS__.includes(payloadKey)) {
+    return;
+  }
+
+  scope.__README_VIDEO_RENDER_DEBUG_LOGGED_KEYS__.push(payloadKey);
+  console.log("[READMEVideo.renderDebug]", payloadKey);
+}
 
 /* -------------------------------------------------------------------------- */
 /* Shared styles                                                              */
@@ -381,6 +746,16 @@ const fullscreenCenterStyle = {
 
 const introTextContainerStyle = {
   textAlign: "center",
+};
+
+const introBodyTextStyle = {
+  marginTop: 18,
+  maxWidth: 760,
+  fontSize: 22,
+  lineHeight: 1.4,
+  fontFamily: "var(--video-font-family)",
+  color: COLORS.text,
+  opacity: 0.88,
 };
 
 const outroTextStyle = {
@@ -475,6 +850,19 @@ function getShotImageStyle(scale) {
     transform: `scale(${scale})`,
     borderRadius: LAYOUT.borderRadius,
     boxShadow: "0 0.75rem 2rem rgba(0, 0, 0, 0.22)",
+  };
+}
+
+/**
+ * Builds the shot scene container style.
+ *
+ * @param {number} opacity
+ * @returns {React.CSSProperties}
+ */
+function getShotSceneStyle(opacity) {
+  return {
+    ...fullscreenCenterStyle,
+    opacity,
   };
 }
 
@@ -713,46 +1101,169 @@ function getOutroAnimatedStyle(frame) {
   };
 }
 
+/**
+ * Clamps one numeric progress value to the inclusive 0..1 range.
+ *
+ * @param {number} value
+ * @returns {number}
+ */
+function clampUnit(value) {
+  return Math.max(0, Math.min(1, Number(value) || 0));
+}
+
+/**
+ * Returns one harmonic fade-up factor from 0 to 1.
+ *
+ * @param {number} frame
+ * @param {number} endFrame
+ * @returns {number}
+ */
+function getHarmonicFadeUp(frame, endFrame) {
+  if (endFrame <= 0) {
+    return 1;
+  }
+
+  const progress = clampUnit(frame / endFrame);
+  return 0.5 - 0.5 * Math.cos(Math.PI * progress);
+}
+
+/**
+ * Returns one harmonic fade-down factor from 1 to 0.
+ *
+ * @param {number} frame
+ * @param {number} startFrame
+ * @param {number} endFrame
+ * @returns {number}
+ */
+function getHarmonicFadeDown(frame, startFrame, endFrame) {
+  const durationFrames = endFrame - startFrame;
+
+  if (durationFrames <= 0) {
+    return frame < startFrame ? 1 : 0;
+  }
+
+  const progress = clampUnit((frame - startFrame) / durationFrames);
+  return 0.5 + 0.5 * Math.cos(Math.PI * progress);
+}
+
+/**
+ * Converts one audio-start offset in seconds to non-negative whole frames.
+ *
+ * @param {number} audioStartSeconds
+ * @param {number} fps
+ * @returns {number}
+ */
+function getAudioStartFrameOffset(audioStartSeconds, fps) {
+  const safeSeconds = Math.max(0, Number(audioStartSeconds) || 0);
+  const safeFps = Math.max(1, Number(fps) || 30);
+  return Math.max(0, Math.round(safeSeconds * safeFps));
+}
+
+/**
+ * Returns the harmonic background-music envelope for intro, main and outro.
+ *
+ * The final volume is the minimum of the intro fade-up and outro fade-down.
+ * This keeps transitions smooth even when intro and outro overlap or one of
+ * the sections is extremely short.
+ *
+ * @param {number} frame
+ * @param {number} introDurationFrames
+ * @param {number} outroStartFrame
+ * @param {number} durationInFrames
+ * @param {number} maxVolume
+ * @returns {number}
+ */
+function getBackgroundMusicVolume(
+  frame,
+  introDurationFrames,
+  outroStartFrame,
+  durationInFrames,
+  maxVolume,
+) {
+  const safeDurationInFrames = Math.max(0, Number(durationInFrames) || 0);
+  const safeIntroEndFrame = Math.max(0, Math.min(Number(introDurationFrames) || 0, safeDurationInFrames));
+  const safeOutroStartFrame = Math.max(0, Math.min(Number(outroStartFrame) || 0, safeDurationInFrames));
+  const safeMaxVolume = Math.max(0, Number(maxVolume) || 0);
+
+  if (safeDurationInFrames <= 0 || safeMaxVolume <= 0) {
+    return 0;
+  }
+
+  const fadeUp = getHarmonicFadeUp(frame, safeIntroEndFrame);
+  const fadeDown = getHarmonicFadeDown(frame, safeOutroStartFrame, safeDurationInFrames);
+
+  return safeMaxVolume * Math.min(fadeUp, fadeDown);
+}
+
 /* -------------------------------------------------------------------------- */
 /* Media                                                                      */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Background music with simple fade-in / fade-out.
+ * Background music with a harmonic intro/main/outro envelope.
  *
- * @param {{src?: string}} props
+ * @param {{
+ *   src?: string,
+ *   volume?: number,
+ *   audioStartSeconds?: number,
+ *   introDurationFrames?: number,
+ *   outroStartFrame?: number,
+ * }} props
  * @returns {JSX.Element}
  */
-const BackgroundMusic = ({src = MUSIC_DEFAULTS.src}) => {
+const BackgroundMusic = ({
+  src,
+  volume,
+  audioStartSeconds = 0,
+  introDurationFrames = 0,
+  outroStartFrame = 0,
+}) => {
   const frame = useCurrentFrame();
-  const {durationInFrames} = useVideoConfig();
-
-  const volume = interpolate(
+  const {durationInFrames, fps} = useVideoConfig();
+  const musicDefaults = getMusicDefaults();
+  const resolvedSrc = src || musicDefaults.src;
+  const resolvedVolume = Math.max(0, Number(volume ?? musicDefaults.volume) || 0);
+  const startFrom = getAudioStartFrameOffset(audioStartSeconds, fps);
+  const backgroundVolume = getBackgroundMusicVolume(
     frame,
-    [
-      0,
-      MUSIC_DEFAULTS.fadeDuration,
-      durationInFrames - MUSIC_DEFAULTS.fadeDuration,
-      durationInFrames,
-    ],
-    [0, MUSIC_DEFAULTS.volume, MUSIC_DEFAULTS.volume, 0],
-    {
-      extrapolateLeft: "clamp",
-      extrapolateRight: "clamp",
-    }
+    introDurationFrames,
+    outroStartFrame,
+    durationInFrames,
+    resolvedVolume,
   );
 
-  return <Audio src={buildMediaUrl(getMediaFileName(src, MUSIC_DEFAULTS.src))} volume={volume} />;
+  return (
+    <Audio
+      src={buildMediaUrl(getMediaFileName(resolvedSrc, musicDefaults.src))}
+      startFrom={startFrom}
+      volume={backgroundVolume}
+    />
+  );
 };
 
 /* -------------------------------------------------------------------------- */
 /* Scenes                                                                     */
 /* -------------------------------------------------------------------------- */
 
-const Intro = ({title, subtitle, introConfig}) => {
+const Intro = ({project}) => {
   const frame = useCurrentFrame();
+  const introAnimations = getProjectIntroAnimations();
+  const title = String(project?.title || "");
+  const subtitle = String(project?.subtitle || "");
+  const introText = String(project?.introText || "");
+  const introBackground = getProjectIntroBackgroundConfig(project);
+  const introConfig = {
+    layout: {
+      horizontalAlign: "center",
+      verticalAlign: "center",
+      offsetX: 0,
+      offsetY: 0,
+    },
+    background: introBackground,
+    ...introAnimations,
+  };
   const containerStyle = getIntroContainerStyle(frame, introConfig);
-  const background = getIntroBackgroundConfig(introConfig?.background);
+  const background = introBackground;
 
   return (
     <AbsoluteFill className="video-template" style={fullscreenCenterStyle}>
@@ -762,6 +1273,7 @@ const Intro = ({title, subtitle, introConfig}) => {
       <div style={containerStyle}>
         <h1 className="video-title" style={getIntroTitleStyle()}>{title}</h1>
         <p className="video-subtitle" style={getIntroSubtitleStyle()}>{subtitle}</p>
+        {introText ? <p style={introBodyTextStyle}>{introText}</p> : null}
       </div>
     </AbsoluteFill>
   );
@@ -770,20 +1282,21 @@ const Intro = ({title, subtitle, introConfig}) => {
 /**
  * One shot scene.
  *
- * @param {{shot: any}} props
+ * @param {{shot: any, durationInFrames: number}} props
  * @returns {JSX.Element}
  */
-const Shot = ({shot}) => {
+const Shot = ({shot, durationInFrames}) => {
   const frame = useCurrentFrame();
 
   const src = getShotSource(shot);
   const headline = getShotHeadline(shot);
   const caption = getShotCaption(shot);
   const zoomBase = getShotZoom(shot);
-  const scale = zoomBase + frame * 0.0008;
+  const transitionState = getShotTransitionState(frame, shot, durationInFrames);
+  const scale = zoomBase + frame * 0.0008 + transitionState.transitionScaleOffset;
 
   return (
-    <AbsoluteFill className="video-template" style={fullscreenCenterStyle}>
+    <AbsoluteFill className="video-template" style={getShotSceneStyle(transitionState.opacity)}>
       <Img src={buildMediaUrl(src)} style={getShotImageStyle(scale)} />
 
       {caption ? <div className="video-caption" style={getCaptionStyle(frame, shot)}>{caption}</div> : null}
@@ -791,9 +1304,6 @@ const Shot = ({shot}) => {
       {headline ? <div style={getHeadlineStyle()}>{headline}</div> : null}
     </AbsoluteFill>
   );
-
-
-
 };
 
 /**
@@ -836,34 +1346,61 @@ function getShotSequenceKey(shot, index) {
 }
 
 export const READMEVideo = (props) => {
-  const {shots = []} = props;
-  const introConfig = getIntroConfig(props);
-  const outroText = getOutroText(props);
+  const project = getRenderProject(props);
+  const runtime = getVideoRuntime(props);
+  const canonicalVideoConfig = getCanonicalVideoConfig(props);
+  const shots = Array.isArray(runtime?.shotScenes)
+    ? runtime.shotScenes.map((scene) => ({
+      ...scene.shot,
+      ...scene,
+      durationInFrames: scene.durationFrames,
+    }))
+    : [];
+  const introDurationFrames = Number(runtime?.introScene?.durationFrames ?? 0);
+  const outroDurationFrames = Number(runtime?.outroScene?.durationFrames ?? 0);
+  const outroStartFrame = Number(runtime?.outroScene?.startFrame ?? introDurationFrames);
+  const renderDebug = getRenderDebugPayload(
+    {
+      ...props,
+      project,
+      shots: canonicalVideoConfig.shots,
+    },
+    shots,
+  );
+
+  logRenderDebugOnce(renderDebug);
 
   return (
     <AbsoluteFill>
-      <BackgroundMusic />
+      <BackgroundMusic
+        volume={project?.musicVolume}
+        audioStartSeconds={project?.audioStartSeconds}
+        introDurationFrames={introDurationFrames}
+        outroStartFrame={outroStartFrame}
+      />
 
-      <Sequence from={0} durationInFrames={TIMING.intro}>
-        <Intro
-          title={introConfig.title}
-          subtitle={introConfig.subtitle}
-          introConfig={introConfig}
-        />
+      <Sequence from={0} durationInFrames={introDurationFrames}>
+        <Intro project={project} />
       </Sequence>
 
       {shots.map((shot, index) => (
         <Sequence
           key={getShotSequenceKey(shot, index)}
-          from={getShotStart(shots, index)}
-          durationInFrames={getShotDuration(shot)}
+          from={Number(shot?.startFrame ?? introDurationFrames)}
+          durationInFrames={Number(shot?.durationInFrames ?? shot?.durationFrames ?? 1)}
         >
-          <Shot shot={shot} />
+          <Shot
+            shot={shot}
+            durationInFrames={Number(shot?.durationInFrames ?? shot?.durationFrames ?? 1)}
+          />
         </Sequence>
       ))}
 
-      <Sequence from={getOutroStart(shots)} durationInFrames={TIMING.outro}>
-        <Outro text={outroText} />
+      <Sequence
+        from={outroStartFrame}
+        durationInFrames={outroDurationFrames}
+      >
+        <Outro text={String(project?.outroText || "")} />
       </Sequence>
     </AbsoluteFill>
   );

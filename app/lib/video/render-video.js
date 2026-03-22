@@ -10,32 +10,42 @@
  * Responsibilities
  * ----------------
  * - Read `config/config.json`
- * - Resolve the configured `video-shots` directory
- * - Load `video.config.json`
- * - Synchronize render media into `public/video-shots`
- * - Bundle the Remotion entry
- * - Select the `READMEVideo` composition
- * - Render the final MP4 into `public/demo.mp4`
+ * - Resolve the selected project directory below `video-shots`
+ * - Load the selected project's `video.config.json`
  *
  * Runtime model
  * -------------
  * The Remotion renderer does not fetch media from the app's Express server.
  * During rendering, media must be available inside the Remotion bundle/public
- * context. Therefore, all referenced media files are copied from
- * `${config.base}` into `app/public/video-shots` before bundling.
+ * context. Therefore, all referenced media files are copied from the selected
+ * project directory inside `config.base` into `app/public/video-shots` before
+ * bundling.
  *
  * Source of truth
  * ---------------
  * `config/config.json` is the single source of truth for:
- * - `base` -> absolute path to the real `video-shots` directory
+ * - `base` -> absolute path to the real `video-shots` root directory
  *
  * Change log
  * ----------
  * 2026-03-14
  * - Restored media sync into `public/video-shots` for Remotion bundle access
  * - Kept `config.base` as the filesystem source of truth for input media
- * - Moved final output video back to `public/demo.mp4`
  * - Added structured module header and industrial-style function sections
+ *
+ * 2026-03-18
+ * - Fixed selected-project runtime resolution for final video rendering
+ * - Stopped loading `video.config.json` from the root `video-shots` directory
+ *
+ * 2026-03-20
+ * - Added explicit public render URL resolution for frontend preview handoff
+ * - Emitted one machine-readable render result line after successful rendering
+ * - Kept output file generation project-based inside `public/renders`
+ * - Restored preferred-project resolution in `main()` after preview URL handoff refactor
+ *
+ * 2026-03-21
+ * - Loaded analyzed beat metadata during final rendering
+ * - Applied beat-sync timing through the composition mapper before bundling
  */
 /* ========================================================================== */
 
@@ -44,6 +54,11 @@ import fs from "node:fs/promises";
 import {fileURLToPath} from "node:url";
 import {bundle} from "@remotion/bundler";
 import {selectComposition, renderMedia} from "@remotion/renderer";
+import {loadAppRuntimeContext} from "../../config/app-config.js";
+import {readJsonFile, readJsonFileOrFallback} from "../server/json-files.js";
+import {copyFile, ensureDir, removeDirContents} from "../server/video-files.js";
+import {mapVideoConfigToComposition} from "./video-config-mapper.js";
+import {buildDefaultProjectTitle} from "./video-config-shape.js";
 
 /* -------------------------------------------------------------------------- */
 /* Paths                                                                      */
@@ -58,96 +73,31 @@ const PATHS = {
   remotionEntry: path.join(appRoot, "remotion", "entry.jsx"),
   publicDir: path.join(appRoot, "public"),
   publicVideoShotsDir: path.join(appRoot, "public", "video-shots"),
-  outputVideo: path.join(appRoot, "public", "demo.mp4"),
+  rendersDir: path.join(appRoot, "public", "renders"),
+  renderLogFile: path.join(appRoot, "lib", "server", "render.log"),
 };
 
-/* -------------------------------------------------------------------------- */
-/* File helpers                                                               */
-/* -------------------------------------------------------------------------- */
+//TODO:Logmuster so wiederverwenden
 
+/* -------------------------------------------------------------------------- */
+/* Logging                                                         */
+/* -------------------------------------------------------------------------- */
+import fsSync from "node:fs";
 
 /**
- * Reads and parses one JSON file.
+ * Writes one log line into server/render.log
  *
- * @param {string} filePath
- * @returns {Promise<any>}
+ * @param {string} message
  */
-async function readJsonFile(filePath) {
-  const fileContents = await fs.readFile(filePath, "utf8");
-  return JSON.parse(fileContents);
-}
-
-/**
- * Reads one JSON file, but returns a fallback value when the file is missing.
- *
- * @param {string} filePath
- * @param {any} fallbackValue
- * @returns {Promise<any>}
- */
-async function readJsonFileOrFallback(filePath, fallbackValue) {
+function writeLogLine(message) {
   try {
-    return await readJsonFile(filePath);
-  } catch (error) {
-    if (error?.code === "ENOENT") {
-      return fallbackValue;
-    }
-
-    throw error;
+    const line = `${new Date().toISOString()} ${message}\n`;
+    fsSync.appendFileSync(PATHS.renderLogFile, line, "utf8");
+  } catch (err) {
+    // bewusst still – Logging darf Rendering nicht crashen
   }
 }
 
-/**
- * Ensures that one directory exists.
- *
- * @param {string} dirPath
- * @returns {Promise<void>}
- */
-async function ensureDirectory(dirPath) {
-  await fs.mkdir(dirPath, {recursive: true});
-}
-
-/**
- * Removes all existing files from one directory.
- * This keeps the public media mirror deterministic between renders.
- *
- * @param {string} dirPath
- * @returns {Promise<void>}
- */
-async function emptyDirectory(dirPath) {
-  await ensureDirectory(dirPath);
-  const entries = await fs.readdir(dirPath, {withFileTypes: true});
-
-  await Promise.all(
-    entries.map((entry) =>
-      fs.rm(path.join(dirPath, entry.name), {recursive: true, force: true})
-    )
-  );
-}
-
-/**
- * Copies one file into the target directory and returns the copied file name.
- *
- * @param {string} sourcePath
- * @param {string} targetDir
- * @returns {Promise<string>}
- */
-async function copyFileToDirectory(sourcePath, targetDir) {
-  const fileName = path.basename(sourcePath);
-  const targetPath = path.join(targetDir, fileName);
-
-  await fs.copyFile(sourcePath, targetPath);
-  return fileName;
-}
-
-/**
- * Ensures that the parent directory for one file path exists.
- *
- * @param {string} filePath
- * @returns {Promise<void>}
- */
-async function ensureParentDirectory(filePath) {
-  await ensureDirectory(path.dirname(filePath));
-}
 
 /**
  * Writes one status line to stdout for the GUI and server log.
@@ -155,77 +105,184 @@ async function ensureParentDirectory(filePath) {
  * @param {string} message
  */
 function logStatus(message) {
-  console.log(`[render-status] ${message}`);
+  writeLogLine(`[render-status] ${message}`);
 }
 
 /* -------------------------------------------------------------------------- */
 /* Config helpers                                                             */
 /* -------------------------------------------------------------------------- */
 
+
 /**
- * Removes a trailing slash from one path-like string.
+ * Sanitizes one dynamic file name segment for filesystem usage.
  *
  * @param {string} value
  * @returns {string}
  */
-function normalizeBasePath(value = "") {
-  return String(value).replace(/\/$/, "");
+function sanitizeFileNameSegment(value = "") {
+  return String(value)
+    .trim()
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, "-")
+    .replace(/\s+/g, "_")
+    .replace(/-+/g, "-")
+    .replace(/_+/g, "_")
+    .replace(/^[-_]+|[-_]+$/g, "") || "untitled";
 }
 
-/**
- * Resolves the configured `video-shots` directory.
- *
- * @param {string} basePath
- * @returns {string}
- */
-function resolveVideoShotsDir(basePath) {
-  if (!basePath) {
-    throw new Error('config.json is missing required field "base".');
-  }
-
-  if (!path.isAbsolute(basePath)) {
-    throw new Error(
-      `config.base must be an absolute local filesystem path. Received: ${basePath}`
-    );
-  }
-
-  return basePath;
-}
 
 /**
- * Resolves the path to `video.config.json` inside the configured shots dir.
- *
- * @param {string} basePath
- * @returns {string}
- */
-function resolveVideoConfigPath(basePath) {
-  const videoShotsDir = resolveVideoShotsDir(basePath);
-  return path.join(videoShotsDir, "video.config.json");
-}
-
-/**
- * Resolves the final output video path.
- *
- * @returns {string}
- */
-function resolveOutputVideoPath() {
-  return PATHS.outputVideo;
-}
-
-/**
- * Validates and normalizes the loaded video configuration.
+ * Resolves the effective project title from the loaded config or directory.
  *
  * @param {any} videoConfig
+ * @param {string} videoShotsDir
+ * @returns {string}
+ */
+function resolveProjectTitle(videoConfig, videoShotsDir) {
+  const configuredTitle = String(videoConfig?.project?.title || "").trim();
+  return configuredTitle || buildDefaultProjectTitle(videoShotsDir);
+}
+
+/**
+ * Builds one stable render timestamp in the format YYYYMMDD-HHmmss.
+ *
+ * @returns {string}
+ */
+function buildRenderTimestamp() {
+  const now = new Date();
+  const pad = (value) => String(value).padStart(2, "0");
+
+  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+}
+
+/**
+ * Resolves the final output video path for one render job.
+ *
+ * Format:
+ * - <project-title>_<timestamp>.mp4
+ *
+ * @param {any} videoConfig
+ * @param {string} videoShotsDir
+ * @returns {string}
+ */
+function resolveOutputVideoPath(videoConfig, videoShotsDir) {
+  const projectTitle = resolveProjectTitle(videoConfig, videoShotsDir);
+  const safeProjectTitle = sanitizeFileNameSegment(projectTitle);
+  const timestamp = buildRenderTimestamp();
+
+  return path.join(PATHS.rendersDir, `${safeProjectTitle}_${timestamp}.mp4`);
+}
+
+/**
+ * Resolves one public browser URL for a rendered file inside `public`.
+ *
+ * @param {string} outputVideoPath
+ * @returns {string}
+ */
+function resolvePublicRenderUrl(outputVideoPath) {
+  const relativePath = path.relative(PATHS.publicDir, outputVideoPath);
+  const normalizedPath = relativePath.split(path.sep).join("/");
+  return `/${normalizedPath}`;
+}
+
+/**
+ * Validates the loaded render config and fails fast on missing or empty input.
+ *
+ * @param {any} rawConfig
+ * @param {string} videoConfigPath
  * @returns {any}
  */
-function normalizeVideoConfig(videoConfig = {}) {
-  const normalized = {
-    ...videoConfig,
-    shots: Array.isArray(videoConfig?.shots) ? videoConfig.shots : [],
-  };
-
-  return normalized;
+function validateRenderVideoConfig(rawConfig, videoConfigPath) {
+  if (
+    !rawConfig ||
+    typeof rawConfig !== "object" ||
+    !rawConfig.project ||
+    !Array.isArray(rawConfig.shots) ||
+    rawConfig.shots.length === 0
+  ) {
+    throw new Error(`Invalid or empty video config: ${videoConfigPath}`);
+  }
+  return rawConfig;
 }
+
+/**
+ * Builds the absolute beat-data file path for one project directory.
+ *
+ * @param {string} videoShotsDir
+ * @returns {string}
+ */
+function resolveBeatDataPath(videoShotsDir) {
+  return path.join(videoShotsDir, "music-beats.json");
+}
+
+/**
+ * Loads analyzed beat metadata for rendering.
+ *
+ * Returns an empty object when the beat file is missing so rendering keeps the
+ * legacy fallback timing behavior.
+ *
+ * @param {string} videoShotsDir
+ * @returns {Promise<any>}
+ */
+async function loadBeatData(videoShotsDir) {
+  return readJsonFileOrFallback(resolveBeatDataPath(videoShotsDir), {});
+}
+
+function buildRenderInputProps(mappedComposition) {
+  return {
+    project: mappedComposition?.composition || {},
+    shots: Array.isArray(mappedComposition?.shots) ? mappedComposition.shots : [],
+  };
+}
+
+function buildRenderConfigLogPayload(videoConfigPath, rawVideoConfig, inputProps) {
+  return {
+    videoConfigPath,
+    targetDurationSeconds: rawVideoConfig?.project?.targetDurationSeconds,
+    totalDurationSeconds: inputProps?.project?.totalDurationSeconds,
+    totalFrames: inputProps?.project?.totalFrames,
+    beatSyncEnabled: inputProps?.project?.beatSyncEnabled,
+    beatSyncStep: inputProps?.project?.beatSyncStep,
+    shotCount: inputProps?.shots?.length || 0,
+    shotDurations: (inputProps?.shots || []).map((shot) => ({
+      id: shot.id,
+      src: shot.src,
+      resolvedDurationSeconds: shot.resolvedDurationSeconds,
+      durationFrames: shot.durationFrames,
+    })),
+  };
+}
+
+function buildRenderProjectLogPayload(inputProps) {
+  return {
+    title: inputProps?.project?.title,
+    subtitle: inputProps?.project?.subtitle,
+    introText: inputProps?.project?.introText,
+    introDurationSeconds: inputProps?.project?.introDurationSeconds,
+    outroText: inputProps?.project?.outroText,
+    outroDurationSeconds: inputProps?.project?.outroDurationSeconds,
+    targetDurationSeconds: inputProps?.project?.targetDurationSeconds,
+    totalDurationSeconds: inputProps?.project?.totalDurationSeconds,
+    totalFrames: inputProps?.project?.totalFrames,
+  };
+}
+
+function buildRenderInputLogPayload(inputProps) {
+  return {
+    shotCount: inputProps?.shots?.length || 0,
+    targetDurationSeconds: inputProps?.project?.targetDurationSeconds,
+    totalDurationSeconds: inputProps?.project?.totalDurationSeconds,
+    totalFrames: inputProps?.project?.totalFrames,
+    beatSyncEnabled: inputProps?.project?.beatSyncEnabled,
+    beatSyncStep: inputProps?.project?.beatSyncStep,
+    durations: (inputProps?.shots || []).map((shot) => ({
+      id: shot.id,
+      src: shot.src,
+      resolvedDurationSeconds: shot.resolvedDurationSeconds,
+      durationFrames: shot.durationFrames,
+    })),
+  };
+}
+
 
 /**
  * Returns whether a file should be copied into the public Remotion media
@@ -252,7 +309,7 @@ function isRenderableMediaFile(fileName) {
  */
 async function syncMediaToPublic(sourceDir) {
   logStatus("Bereite public/video-shots vor ...");
-  await emptyDirectory(PATHS.publicVideoShotsDir);
+  await removeDirContents(PATHS.publicVideoShotsDir);
 
   logStatus("Synchronisiere Medien in den Public-Ordner ...");
   const entries = await fs.readdir(sourceDir, {withFileTypes: true});
@@ -262,7 +319,9 @@ async function syncMediaToPublic(sourceDir) {
     .map((entry) => path.join(sourceDir, entry.name));
 
   await Promise.all(
-    filesToCopy.map((sourcePath) => copyFileToDirectory(sourcePath, PATHS.publicVideoShotsDir))
+    filesToCopy.map((sourcePath) =>
+      copyFile(sourcePath, path.join(PATHS.publicVideoShotsDir, path.basename(sourcePath)))
+    )
   );
 }
 
@@ -270,33 +329,72 @@ async function syncMediaToPublic(sourceDir) {
 /* Input preparation                                                          */
 /* -------------------------------------------------------------------------- */
 
-async function loadRenderContext() {
+/**
+ * Loads the selected project render context.
+ *
+ * @param {string} preferredProjectName
+ * @returns {Promise<{
+ *   activeProject: string,
+ *   videoShotsDir: string,
+ *   videoConfigPath: string,
+ *   outputVideoPath: string,
+ *   publicRenderUrl: string,
+ *   beatData: any,
+ *   inputProps: any,
+ * }>}
+ */
+async function loadRenderContext(preferredProjectName) {
   logStatus("Lade App-Konfiguration ...");
-  const appConfig = await readJsonFile(PATHS.configFile);
-  const basePath = normalizeBasePath(appConfig.base || "");
-  const videoShotsDir = resolveVideoShotsDir(basePath);
-  const videoConfigPath = resolveVideoConfigPath(basePath);
-  const outputVideoPath = resolveOutputVideoPath();
 
+  const {activeProject, videoShotsDir} = await loadAppRuntimeContext(preferredProjectName);
+  const videoConfigPath = path.join(videoShotsDir, "video.config.json");
+
+  logStatus(`Aktives Projekt: ${activeProject}`);
   logStatus(`Video-Shots-Verzeichnis: ${videoShotsDir}`);
   logStatus(`Video-Konfiguration: ${videoConfigPath}`);
-  logStatus(`Render-Output: ${outputVideoPath}`);
 
   logStatus("Lade Video-Konfiguration ...");
-  const videoConfig = normalizeVideoConfig(
-    await readJsonFileOrFallback(videoConfigPath, {shots: []})
-  );
+  const rawVideoConfig = await readJsonFile(videoConfigPath);
+  console.log("[render-config-path]", videoConfigPath);
+  console.log("[render-config]", {
+    title: rawVideoConfig?.project?.title,
+    shotCount: rawVideoConfig?.shots?.length,
+  });
+  const loadedVideoConfig = validateRenderVideoConfig(rawVideoConfig, videoConfigPath);
+  const beatData = await loadBeatData(videoShotsDir);
+  const mappedComposition = mapVideoConfigToComposition(loadedVideoConfig, beatData);
+  const inputProps = {
+    ...buildRenderInputProps(mappedComposition),
+    beatData,
+  };
 
-  logStatus(`Shots geladen: ${videoConfig.shots.length}`);
+  const outputVideoPath = resolveOutputVideoPath(loadedVideoConfig, videoShotsDir);
+  const publicRenderUrl = resolvePublicRenderUrl(outputVideoPath);
+  logStatus(`Render-Output: ${outputVideoPath}`);
+  logStatus(`Render-Preview-URL: ${publicRenderUrl}`);
+  logStatus(`Projekt-Titel: ${resolveProjectTitle(loadedVideoConfig, videoShotsDir)}`);
+  logStatus(`Shots geladen: ${inputProps.shots.length}`);
+  logStatus(`Beat-Sync aktiv: ${inputProps.project?.beatSyncEnabled ? "Ja" : "Nein"}`);
+  logStatus(`Zieldauer: ${inputProps.project?.targetDurationSeconds || 0} Sekunden`);
+  logStatus(`Effektive Dauer: ${inputProps.project?.totalDurationSeconds || 0} Sekunden`);
+
+  writeLogLine(
+    `[render-config] ${JSON.stringify(
+      buildRenderConfigLogPayload(videoConfigPath, loadedVideoConfig, inputProps),
+    )}`
+  );
 
   await syncMediaToPublic(videoShotsDir);
 
   logStatus("Input-Props vorbereitet.");
   return {
-    inputProps: {
-      ...videoConfig,
-    },
+    activeProject,
+    videoShotsDir,
+    videoConfigPath,
     outputVideoPath,
+    publicRenderUrl,
+    beatData,
+    inputProps,
   };
 }
 
@@ -324,9 +422,29 @@ async function createBundle() {
  * @param {string} bundleLocation
  * @param {any} inputProps
  * @returns {Promise<any>}
- */
+ * 
+*/
 async function selectReadmeComposition(bundleLocation, inputProps) {
   logStatus("Wähle Composition READMEVideo ...");
+
+  if (!Array.isArray(inputProps?.shots) || inputProps.shots.length === 0) {
+    throw new Error("Render aborted: no shots available");
+  }
+
+  logStatus(`Input-Shots an Remotion: ${inputProps?.shots?.length || 0}`);
+
+  writeLogLine(
+    `[render-input] ${JSON.stringify(buildRenderInputLogPayload(inputProps))}`
+  );
+
+  writeLogLine(
+    `[render-project] ${JSON.stringify(buildRenderProjectLogPayload(inputProps))}`
+  );
+
+
+
+
+
   return selectComposition({
     serveUrl: bundleLocation,
     id: "READMEVideo",
@@ -346,7 +464,13 @@ async function selectReadmeComposition(bundleLocation, inputProps) {
 async function renderReadmeVideo(bundleLocation, composition, inputProps, outputVideoPath) {
   logStatus("Starte Videorendering ...");
 
-  await ensureParentDirectory(outputVideoPath);
+  if (!Array.isArray(inputProps?.shots) || inputProps.shots.length === 0) {
+    throw new Error("Render aborted: no shots available");
+  }
+
+  await ensureDir(path.dirname(outputVideoPath));
+
+  //TODO:Warum ist codec hier hardgecoded
 
   await renderMedia({
     composition,
@@ -356,7 +480,7 @@ async function renderReadmeVideo(bundleLocation, composition, inputProps, output
     inputProps,
     onProgress: ({progress}) => {
       const percent = Math.round(progress * 100);
-      console.log(`[render-progress] ${percent}%`);
+      //console.log(`[render-progress] ${percent}%`);
     },
   });
 
@@ -368,6 +492,22 @@ async function renderReadmeVideo(bundleLocation, composition, inputProps, output
 /* -------------------------------------------------------------------------- */
 
 /**
+ * Returns the preferred project name from the CLI arguments.
+ *
+ * Supports `--project=<name>` when the script is launched from the render
+ * runner.
+ *
+ * @returns {string}
+ */
+function resolvePreferredProjectName() {
+  const projectArg = process.argv
+    .slice(2)
+    .find((arg) => typeof arg === "string" && arg.startsWith("--project="));
+
+  return projectArg ? projectArg.slice("--project=".length).trim() : "";
+}
+
+/**
  * Executes the complete render workflow.
  *
  * @returns {Promise<void>}
@@ -375,7 +515,11 @@ async function renderReadmeVideo(bundleLocation, composition, inputProps, output
 async function main() {
   logStatus("Rendering initialisiert.");
 
-  const {inputProps, outputVideoPath} = await loadRenderContext();
+  // fsSync.mkdirSync(path.dirname(PATHS.renderLogFile), {recursive: true}); // removed unnecessary directory creation
+  fsSync.writeFileSync(PATHS.renderLogFile, "", "utf8");
+
+  const preferredProjectName = resolvePreferredProjectName();
+  const {inputProps, outputVideoPath, publicRenderUrl} = await loadRenderContext(preferredProjectName);
   const bundleLocation = await createBundle();
   const composition = await selectReadmeComposition(bundleLocation, inputProps);
   logStatus(`Composition-Dauer: ${composition.durationInFrames} Frames`);
@@ -383,7 +527,13 @@ async function main() {
   await renderReadmeVideo(bundleLocation, composition, inputProps, outputVideoPath);
 
   logStatus("Ausgabedatei geschrieben.");
-  console.log(`Video rendered to ${outputVideoPath}`);
+  writeLogLine(`Video rendered to ${outputVideoPath}`);
+  writeLogLine(
+    `[render-result] ${JSON.stringify({
+      outputVideoPath,
+      publicRenderUrl,
+    })}`
+  );
   logStatus("Rendering vollständig beendet.");
 }
 

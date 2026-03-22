@@ -13,138 +13,186 @@
  * - Drive the JSON editor / asset-detail mode in the center panel
  * - Persist shot edits and merge saved backend responses back into runtime state
  * - Keep timeline and inspector state synchronized after asset changes
+ * - Normalize duration handling around canonical `durationSeconds`
  *
  * Notes
  * -----
  * - This module expects higher-level orchestration helpers such as
  *   `buildShotSavePayload()`, `buildAssetsFromShots()`, `buildSegmentsFromShots()`,
- *   `renderTimeline()`, `updateInspectorInfo()`, `openAssetEditor()`,
- *   `saveActiveAssetBeforeSwitch()`, `getAssetActiveClass()`, `getTotalDuration()`
- *   and `updatePlayhead()` to remain available in the current frontend runtime.
+ *   `renderVideoTimeline()`, `updateInspectorInfo()`, `openAssetEditor()`,
+ *   `persistActiveAssetIfNeeded()`, `getTotalDuration()`
+ *   and `updateVideoPlayhead()` to remain available in the current frontend runtime.
  * - Keep this module focused on asset/editor concerns, not render orchestration.
  *
  * Change log
  * ----------
- * 2026-03-15
- * - Added structured module header and consistent section layout
- * - Exported the main asset/editor helpers for use from `index.js`
- * - Kept card rendering internal while cleaning spacing and comments
+ * 2026-03-20
+ * - Refactored duration handling around canonical `durationSeconds`
+ * - Removed legacy shot-duration fallbacks from asset/timeline mapping
+ * - Split asset-to-shot normalization into smaller helpers
+ * - Treated shots from `video.config.json` as assigned by default unless explicitly false
+ *
+ * 2026-03-17
+ * - Made the `Nicht zugeordnet` badge directly clickable for quick assignment
+ * - Split asset-card interaction targets into card-open vs. assign-trigger paths
+ * - Added immediate assign-on-click persistence so unassigned assets become
+ *   configured shots without opening the editor first
+ * - Fixed editor-save payloads so assets opened from the rail are persisted as
+ *   assigned shots in `video.config.json`
+ * - Hardened quick-assign badge flow so local state stays assigned even when
+ *   backend responses omit the `assigned` flag
+ * - Fixed quick-assign follow-up clicks by opening newly assigned assets
+ *   directly instead of re-entering the save-before-switch editor path
+ *  - Forced an immediate asset-list rerender after quick-assign so later
+ *    assignments become visible without a manual refresh
  */
 /* ========================================================================== */
 
-//
-import {dom} from "./dom.js";
-
-
-import {SHOT_DEFAULTS, state, UI_TEXT} from "./state.js";
-import {requestSaveShot} from "./api.js";
-
-
 import {
+  buildAssetAssignPayload,
+  buildShotSavePayload,
+  persistAssetIfNeeded,
+} from "./asset-persistence.js";
+import {renderAssetList} from "./asset-renderer.js";
+import {registerAssetDnD} from "./asset-dnd.js";
+import {dom} from "./dom.js";
+import {SHOT_DEFAULTS, state, UI_TEXT} from "./state.js";
+import {
+  buildAssetSelectionInfo,
+  fillJsonForm,
   setJsonFileName,
   setPanelCaption,
   setSelectionInfo,
   toggleJsonEditor,
   toggleVideoPlaceholder,
 } from "./ui.js";
+import {
+  getTotalDuration,
+  renderVideoTimeline,
+  updateVideoPlayhead,
+  buildSegmentsFromShots,
+} from "./video-timeline.js";
 
-
-import {updatePlayhead, renderTimeline,getTotalDuration} from "./timeline.js";
-
-
-
+import {updateInspectorInfo} from "./project-inspector.js";
+import buildAssetsFromShots from "./assets-builder.js";
 
 
 
 /**
- * Returns the active CSS class for one asset card.
+ * Resolves whether one shot should be treated as assigned.
+ * Canonical configured shots from `video.config.json` are assigned by default.
+ * Only an explicit `false` keeps a shot unassigned.
  *
- * @param {string} assetId
- * @returns {string}
+ * @param {any} shot
+ * @returns {boolean}
  */
-function getAssetActiveClass(assetId) {
-  return assetId === state.activeAssetId ? "active" : "";
+function isConfiguredShotAssigned(shot) {
+  return shot?.assigned !== false;
 }
 
-
-
 /**
- * Builds a save payload from the current JSON editor form state.
+ * Returns the canonical editor JSON payload for one shot.
  *
- * @param {any} asset
- * @returns {Record<string, any> | null}
+ * @param {any} shot
+ * @param {boolean} assigned
+ * @returns {object}
  */
-function buildShotSavePayload(asset) {
-  if (!asset) return null;
+function buildAssetJsonFromShot(shot, assigned) {
+  const src = String(shot?.src || "").trim();
+  const title = String(shot?.title || "").trim();
+  const durationSeconds = getShotDurationSeconds(shot);
 
   return {
-    id: asset.id,
-    src: dom.fieldSrc?.value || asset.json.src || asset.fileName,
-    title: dom.fieldTitle?.value || "",
-    headline: dom.fieldTitle?.value || "",
-    duration: Number(dom.fieldDuration?.value || SHOT_DEFAULTS.duration),
-    transition: dom.fieldTransition?.value || SHOT_DEFAULTS.transition,
-    zoom: Number(dom.fieldZoom?.value || SHOT_DEFAULTS.zoom),
-    pan: dom.fieldPan?.value || SHOT_DEFAULTS.pan,
-    caption: dom.fieldCaption?.value || SHOT_DEFAULTS.caption,
+    src,
+    title,
+    duration: durationSeconds,
+    durationSeconds,
+    transition: shot?.transition || SHOT_DEFAULTS.transition,
+    zoom: shot?.zoom ?? SHOT_DEFAULTS.zoom,
+    pan: shot?.pan || SHOT_DEFAULTS.pan,
+    caption: shot?.caption || SHOT_DEFAULTS.caption,
+    assigned,
   };
 }
 
-
+/**
+ * Returns the normalized JSON payload stored on one asset.
+ *
+ * @param {any} asset
+ * @returns {Record<string, any>}
+ */
+function getAssetJson(asset) {
+  return asset?.json && typeof asset.json === "object" ? asset.json : {};
+}
 
 /**
- * Maps normalized shot data to asset-rail entries.
+ * Normalizes one saved backend shot before it is merged into local asset state.
  *
- * @param {any[]} shots
- * @returns {Array<{id: string, assigned: boolean, fileName: string, thumb: string, json: object}>}
+ * @param {any} savedShot
+ * @returns {object}
  */
-export function buildAssetsFromShots(shots) {
-  return shots.map((shot, index) => ({
-    id: shot.id || `asset-${index + 1}`,
-    assigned: Boolean(shot.assigned),
-    fileName: String(shot.src || `shot-${index + 1}.png`).split("/").pop(),
-    thumb: shot.previewUrl || toPreviewUrl(shot.src),
-    json: {
-      src: shot.src || "",
-      title: shot.title || shot.headline || "",
-      duration: Number(shot.duration ?? shot.durationInFrames ?? SHOT_DEFAULTS.duration),
-      transition: shot.transition || SHOT_DEFAULTS.transition,
-      zoom: shot.zoom ?? SHOT_DEFAULTS.zoom,
-      pan: shot.pan || SHOT_DEFAULTS.pan,
-      caption: shot.caption || SHOT_DEFAULTS.caption,
-    },
-  }));
+function buildNormalizedSavedShot(savedShot) {
+  return {
+    ...savedShot,
+    durationSeconds: getShotDurationSeconds(savedShot),
+    assigned: true,
+  };
+}
+
+/**
+ * Maps one normalized editor asset back to one assigned shot.
+ *
+ * @param {any} asset
+ * @returns {object}
+ */
+function mapAssignedAssetToShot(asset) {
+  const json = getAssetJson(asset);
+  const durationSeconds = getShotDurationSeconds(json);
+
+  return {
+    id: asset.id,
+    title: json.title,
+    durationSeconds,
+    transition: json.transition,
+    zoom: json.zoom,
+    pan: json.pan,
+    caption: json.caption,
+    src: json.src,
+    previewUrl: asset.thumb,
+    assigned: true,
+  };
+}
+
+/**
+ * Returns all currently assigned shots from runtime assets.
+ *
+ * @returns {any[]}
+ */
+function getAssignedShotsFromAssets() {
+  return state.assets
+    .filter((asset) => asset.assigned)
+    .map(mapAssignedAssetToShot);
 }
 
 
 
-/* -------------------------------------------------------------------------- */
-/* DATA MAPPERS                                                               */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Maps normalized shot data to timeline segments.
- *
- * @param {any[]} shots
- * @returns {Array<{id: string, label: string, start: number, end: number, image: string}>}
- */
-export function buildSegmentsFromShots(shots) {
-  let currentStart = 0;
-
-  return shots.map((shot, index) => {
-    const duration = Number(shot.duration ?? shot.durationInFrames ?? SHOT_DEFAULTS.duration);
-    const segment = {
-      id: shot.id || `segment-${index + 1}`,
-      label: shot.title || shot.headline || `Shot ${index + 1}`,
-      start: currentStart,
-      end: currentStart + duration,
-      image: shot.previewUrl || toPreviewUrl(shot.src),
-    };
-
-    currentStart += duration;
-    return segment;
-  });
+function buildAssignedSegmentsFromAssets() {
+  return buildSegmentsFromShots(getAssignedShotsFromAssets());
 }
+
+function syncAssetsAndSegments() {
+  state.segments = buildAssignedSegmentsFromAssets();
+
+  updateInspectorInfo();
+  renderVideoTimeline();
+  renderAssetList();
+}
+
+
+
+
+
+
 
 
 
@@ -162,55 +210,7 @@ export function findAssetById(assetId) {
   return state.assets.find((entry) => entry.id === assetId);
 }
 
-/**
- * Builds the HTML markup for one asset card.
- *
- * @param {{id: string, fileName: string, thumb: string, json: {title: string}, assigned: boolean}} asset
- * @returns {string}
- */
-function renderAssetCard(asset) {
-  const activeClass = getAssetActiveClass(asset.id);
-  const assignedClass = asset.assigned ? "" : "unassigned";
-  const assignedBadge = asset.assigned
-    ? '<span class="badge text-bg-primary">Shot</span>'
-    : '<span class="badge text-bg-secondary">Nicht zugeordnet</span>';
 
-  return `
-    <article class="asset-item ${activeClass} ${assignedClass}" data-asset-id="${asset.id}">
-      <div class="asset-thumb-shell">
-        <img class="asset-thumb" src="${asset.thumb}" alt="${asset.fileName}" />
-        <div class="asset-overlay"></div>
-        <div class="asset-badge">${assignedBadge}</div>
-      </div>
-      <div class="p-3">
-        <div class="d-flex justify-content-between align-items-start gap-2 mb-1">
-          <div class="fw-semibold">${asset.fileName}</div>
-        </div>
-        <div class="small text-secondary">${asset.json.title || "Ohne Titel"}</div>
-      </div>
-    </article>
-  `;
-}
-
-/**
- * Renders the right-side asset list.
- */
-export function renderAssetList() {
-  if (!dom.assetList) return;
-  dom.assetList.innerHTML = state.assets.map(renderAssetCard).join("");
-}
-
-
-/**
- * Maps one local image source into the public preview URL served by Express.
- *
- * @param {string} src
- * @returns {string}
- */
-export function toPreviewUrl(src = "") {
-  const fileName = String(src || "").split("/").pop();
-  return fileName ? `/video-shots/${encodeURIComponent(fileName)}` : "";
-}
 
 
 /* -------------------------------------------------------------------------- */
@@ -218,20 +218,30 @@ export function toPreviewUrl(src = "") {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Fills the JSON editor form with metadata for one selected asset.
+ * Builds the editor-aware save payload for the currently opened asset.
+ * This overlays current form values onto the normalized persistence payload.
  *
- * @param {{json: Record<string, any>}} asset
+ * @param {any} asset
+ * @returns {Record<string, any> | null}
  */
-export function fillJsonForm(asset) {
-  if (!asset?.json) return;
+function buildEditorSavePayload(asset) {
+  const payload = buildShotSavePayload(asset);
+  if (!payload) return null;
 
-  if (dom.fieldSrc) dom.fieldSrc.value = asset.json.src;
-  if (dom.fieldTitle) dom.fieldTitle.value = asset.json.title;
-  if (dom.fieldDuration) dom.fieldDuration.value = asset.json.duration;
-  if (dom.fieldTransition) dom.fieldTransition.value = asset.json.transition;
-  if (dom.fieldZoom) dom.fieldZoom.value = asset.json.zoom;
-  if (dom.fieldPan) dom.fieldPan.value = asset.json.pan;
-  if (dom.fieldCaption) dom.fieldCaption.value = asset.json.caption;
+  const durationSeconds = Number(dom.fieldDuration?.value || payload.durationSeconds || SHOT_DEFAULTS.duration);
+
+  return {
+    ...payload,
+    src: dom.fieldSrc?.value || payload.src,
+    title: dom.fieldTitle?.value || payload.title,
+    headline: dom.fieldTitle?.value || payload.headline,
+    durationSeconds,
+    transition: dom.fieldTransition?.value || payload.transition || SHOT_DEFAULTS.transition,
+    zoom: Number(dom.fieldZoom?.value || payload.zoom || SHOT_DEFAULTS.zoom),
+    pan: dom.fieldPan?.value || payload.pan || SHOT_DEFAULTS.pan,
+    caption: dom.fieldCaption?.value || payload.caption || SHOT_DEFAULTS.caption,
+    assigned: true,
+  };
 }
 
 /**
@@ -246,7 +256,7 @@ export async function showAssetEditor(assetId) {
   if (!asset) return;
 
   if (state.activeAssetId && state.activeAssetId !== assetId) {
-    await saveActiveAssetBeforeSwitch(assetId);
+    await persistActiveAssetIfNeeded();
   }
 
   const nextAsset = findAssetById(assetId);
@@ -256,6 +266,19 @@ export async function showAssetEditor(assetId) {
 }
 
 
+/**
+ * Opens the right-sidebar Bootstrap tab for the selected section/editor.
+ * Falls back silently when Bootstrap's Tab API is unavailable.
+ */
+function openSelectedSectionTab() {
+  const selectedSectionTab = dom.selectedSectionTab;
+  if (!selectedSectionTab) return;
+
+  const bootstrapTabApi = window.bootstrap?.Tab;
+  if (!bootstrapTabApi?.getOrCreateInstance) return;
+
+  bootstrapTabApi.getOrCreateInstance(selectedSectionTab).show();
+}
 
 /**
  * Applies the selected asset to the JSON editor UI.
@@ -267,10 +290,28 @@ function openAssetEditor(asset) {
   renderAssetList();
   fillJsonForm(asset);
   setJsonFileName(asset.fileName);
+  openSelectedSectionTab();
   toggleJsonEditor(true);
   toggleVideoPlaceholder(false);
   setPanelCaption(UI_TEXT.assetModeCaption);
-  setSelectionInfo(`Bild: ${asset.fileName}`);
+  setSelectionInfo(buildAssetSelectionInfo(asset));
+}
+
+
+/**
+ * Opens one asset directly after it has already been persisted/merged.
+ *
+ * This bypasses the normal editor-switch save path, which is useful for the
+ * quick-assign badge flow where the clicked asset has just been assigned and
+ * merged into local state.
+ *
+ * @param {string} assetId
+ */
+function openAssignedAssetById(assetId) {
+  const asset = findAssetById(assetId);
+  if (!asset) return;
+
+  openAssetEditor(asset);
 }
 
 
@@ -280,10 +321,20 @@ function openAssetEditor(asset) {
 export function showSegmentView() {
   state.activeAssetId = null;
   renderAssetList();
+  const clipTab = dom.clipTab;
+  const bootstrapTabApi = window.bootstrap?.Tab;
+  if (clipTab && bootstrapTabApi?.getOrCreateInstance) {
+    bootstrapTabApi.getOrCreateInstance(clipTab).show();
+  }
   toggleJsonEditor(false);
   toggleVideoPlaceholder(true);
   setPanelCaption(UI_TEXT.segmentModeCaption);
-  updatePlayhead((state.currentTime / getTotalDuration()) * 100);
+  const totalDuration = getTotalDuration();
+  const playheadPercent = totalDuration > 0
+    ? (state.currentTime / totalDuration) * 100
+    : 0;
+
+  updateVideoPlayhead(playheadPercent);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -299,12 +350,26 @@ export async function persistActiveAssetIfNeeded() {
   if (!state.activeAssetId) return;
 
   const activeAsset = findAssetById(state.activeAssetId);
-  const payload = buildShotSavePayload(activeAsset);
+  const payload = buildEditorSavePayload(activeAsset);
 
   if (!payload) return;
 
-  const response = await requestSaveShot(payload);
-  mergeSavedAsset(response.shot);
+  const response = await persistAssetIfNeeded(payload);
+  if (response?.shot) {
+    mergeSavedAsset(response.shot);
+  }
+}
+
+
+function mergeOrAppendAsset(nextAsset) {
+  const existingIndex = state.assets.findIndex((asset) => asset.id === nextAsset.id);
+
+  if (existingIndex >= 0) {
+    state.assets[existingIndex] = nextAsset;
+    return;
+  }
+
+  state.assets.push(nextAsset);
 }
 
 /**
@@ -313,36 +378,27 @@ export async function persistActiveAssetIfNeeded() {
  * @param {any} savedShot
  */
 export function mergeSavedAsset(savedShot) {
-  const nextAsset = buildAssetsFromShots([savedShot])[0];
-  const existingIndex = state.assets.findIndex(
-    (asset) => asset.fileName === nextAsset.fileName
-  );
+  const normalizedSavedShot = buildNormalizedSavedShot(savedShot);
+  const nextAsset = buildAssetsFromShots([normalizedSavedShot])[0];
+  mergeOrAppendAsset(nextAsset);
 
-  if (existingIndex >= 0) {
-    state.assets[existingIndex] = nextAsset;
-  } else {
-    state.assets.push(nextAsset);
-  }
+  state.assets = [...state.assets];
+  syncAssetsAndSegments();
+}
 
-  state.segments = buildSegmentsFromShots(
-    state.assets
-      .filter((asset) => asset.assigned)
-      .map((asset) => ({
-        id: asset.id,
-        title: asset.json.title,
-        duration: asset.json.duration,
-        transition: asset.json.transition,
-        zoom: asset.json.zoom,
-        pan: asset.json.pan,
-        caption: asset.json.caption,
-        src: asset.json.src,
-        previewUrl: asset.thumb,
-        assigned: asset.assigned,
-      }))
-  );
-
-  updateInspectorInfo();
-  renderTimeline();
+/**
+ * Returns the shot-board list elements needed for click handling and Sortable binding.
+ *
+ * @returns {{
+ *   selectedListElement: HTMLElement | null,
+ *   unselectedListElement: HTMLElement | null,
+ * }}
+ */
+function getShotBoardElements() {
+  return {
+    selectedListElement: dom.selectedShotList,
+    unselectedListElement: dom.unselectedShotList,
+  };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -352,12 +408,72 @@ export function mergeSavedAsset(savedShot) {
 /**
  * Registers asset-rail interaction events.
  */
+
+async function handleAssignAssetClick(assetId) {
+  const asset = findAssetById(assetId);
+  const payload = buildAssetAssignPayload(asset);
+
+  if (!payload) return;
+
+  try {
+    const response = await persistAssetIfNeeded(payload);
+
+    mergeSavedAsset({
+      ...(response?.shot || payload),
+      assigned: true,
+    });
+
+    openAssignedAssetById(assetId);
+  } catch (error) {
+    console.error("Assign failed", error);
+  }
+}
+
+function bindClickOnce(element, datasetKey, handler) {
+  if (!element || element.dataset[datasetKey] === "true") {
+    return;
+  }
+
+  element.dataset[datasetKey] = "true";
+  element.addEventListener("click", handler);
+}
+
 export function registerAssetEvents() {
-  dom.assetList?.addEventListener("click", async (event) => {
+  const handleAssetListClick = async (event) => {
+    const assignTrigger = event.target.closest("[data-asset-assign-id]");
+
+    if (assignTrigger) {
+      event.preventDefault();
+      event.stopPropagation();
+
+      await handleAssignAssetClick(assignTrigger.dataset.assetAssignId);
+      return;
+    }
+
     const card = event.target.closest("[data-asset-id]");
     if (!card) return;
+
     await showAssetEditor(card.dataset.assetId);
+  };
+
+  const {
+    selectedListElement,
+    unselectedListElement,
+  } = getShotBoardElements();
+
+  bindClickOnce(selectedListElement, "assetClickBound", handleAssetListClick);
+  bindClickOnce(unselectedListElement, "assetClickBound", handleAssetListClick);
+
+  if (state.assetDnDRegistration) {
+    state.assetDnDRegistration.destroy();
+    state.assetDnDRegistration = null;
+  }
+
+  state.assetDnDRegistration = registerAssetDnD({
+    selectedListElement,
+    unselectedListElement,
+    onAssetsChanged: syncAssetsAndSegments,
   });
 
-  dom.backToSegmentButton?.addEventListener("click", showSegmentView);
+  bindClickOnce(dom.backToSegmentButton, "boundAssetBackButton", showSegmentView);
 }

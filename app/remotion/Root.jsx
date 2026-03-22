@@ -1,5 +1,5 @@
 /* ========================================================================== */
-/* Root.jsx                                                                    */
+/* Root.jsx                                                                   */
 /* ========================================================================== */
 /*
  * Purpose
@@ -10,35 +10,23 @@
  * Responsibilities
  * ----------------
  * - Provide one stable `READMEVideo` composition id
- * - Define render dimensions and fps
- * - Provide minimal and realistic default props for studio/dev usage
- * - Derive the composition duration from intro, shot and outro timing
+ * - Define render dimensions, fps and intro/outro timing from canonical config data
+ * - Provide canonical default props for Studio/dev usage
+ * - Derive composition metadata from the canonical video config
+ * - Pass canonical props directly to `READMEVideo`
  *
  * Runtime model
  * -------------
- * The composition duration must match the effective sum of:
- * - intro duration
- * - all configured shot durations
- * - outro duration
+ * The canonical input shape is exactly `{project, shots}`.
+ * Root derives metadata from that shape and passes it unchanged into
+ * `READMEVideo`.
  *
- * This keeps Studio previews and renderer output aligned with the JSON-driven
- * shot timeline.
- *
- * Change log
- * ----------
- * 2026-03-14
- * - Added structured module header
- * - Refactored duration calculation into shared helper functions
- * - Removed hard-coded 300-frame composition duration
- * - Kept default props for local Studio inspection
- * - Aligned default props with the newer `intro` config structure
- * - Replaced overly specific demo defaults with one minimal hero-shot preset
- * - Switched composition duration to `calculateMetadata()` so real input props define render length
  */
 /* ========================================================================== */
 
-
 import {Composition} from "remotion";
+
+import {mapVideoConfigToComposition} from "../lib/video/video-config-mapper.js";
 import {READMEVideo} from "./READMEVideo.jsx";
 
 /* -------------------------------------------------------------------------- */
@@ -46,35 +34,30 @@ import {READMEVideo} from "./READMEVideo.jsx";
 /* -------------------------------------------------------------------------- */
 
 const VIDEO_DEFAULTS = {
-  width: 1920,
-  height: 1080,
-  fps: 30,
-  introDuration: 60,
-  outroDuration: 60,
-  shotDuration: 90,
+  introDurationSeconds: 2,
+  outroDurationSeconds: 2,
+  shotDurationSeconds: 3,
 };
 
-const DEFAULT_PROPS = {
-  intro: {
+const DEFAULT_VIDEO_CONFIG = {
+  project: {
     title: "My Project",
     subtitle: "Awesome open source tool",
-    layout: {
-      horizontalAlign: "center",
-      verticalAlign: "center",
-      offsetX: 0,
-      offsetY: 0,
-    },
-    titleAnimation: {
-      from: {x: -140, y: 24, opacity: 0, letterSpacing: 6},
-      to: {x: 0, y: 0, opacity: 1, letterSpacing: 0},
-      frames: [0, 24],
-    },
-    subtitleAnimation: {
-      from: {x: 90, y: 12, opacity: 0, letterSpacing: 3},
-      to: {x: 0, y: 0, opacity: 1, letterSpacing: 0},
-      frames: [8, 40],
-    },
+    introText: "",
+    introDurationSeconds: VIDEO_DEFAULTS.introDurationSeconds,
+    audioStartSeconds: 0,
+    musicVolume: 0.18,
+    layerColor: "#0b1020",
+    outroText: "github.com/yourname/yourproject",
+    outroDurationSeconds: VIDEO_DEFAULTS.outroDurationSeconds,
+    aspectRatio: "16:9",
+    width: 1920,
+    fps: 30,
+    targetDurationSeconds: VIDEO_DEFAULTS.shotDurationSeconds,
+    beatSyncEnabled: true,
+    beatSyncStep: 1,
   },
+  beatData: {},
   shots: [
     {
       id: "shot-hero",
@@ -82,85 +65,93 @@ const DEFAULT_PROPS = {
       title: "Hero",
       headline: "Hero",
       caption: "",
+      durationSeconds: VIDEO_DEFAULTS.shotDurationSeconds,
+      zoom: 1,
+      transition: "",
+      pan: "center",
       captionAnimation: {
         from: {x: 0, y: 36, opacity: 0, letterSpacing: 2},
         to: {x: 0, y: 0, opacity: 1, letterSpacing: 0},
         frames: [0, 24],
       },
-      duration: VIDEO_DEFAULTS.shotDuration,
-      zoom: 1,
-      transition: "",
-      pan: "center",
     },
   ],
-  outroText: "github.com/yourname/yourproject",
 };
 
 /* -------------------------------------------------------------------------- */
-/* Duration helpers                                                           */
+/* Canonical helpers                                                          */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Returns the effective intro duration in frames.
+ * Returns the effective canonical video config with stable defaults.
  *
- * @returns {number}
+ * @param {any} props
+ * @returns {any}
  */
-function getIntroDuration() {
-  return VIDEO_DEFAULTS.introDuration;
+function getVideoConfig(props = {}) {
+  return {
+    project: {
+      ...DEFAULT_VIDEO_CONFIG.project,
+      ...(props?.project || {}),
+    },
+    beatData:
+      props?.beatData && typeof props.beatData === "object"
+        ? props.beatData
+        : DEFAULT_VIDEO_CONFIG.beatData,
+    shots: Array.isArray(props?.shots) ? props.shots : DEFAULT_VIDEO_CONFIG.shots,
+  };
 }
 
 /**
- * Returns the effective outro duration in frames.
+ * Returns composition settings derived from canonical root props.
  *
- * @returns {number}
+ * @param {any} props
+ * @returns {{
+ *   width: number,
+ *   height: number,
+ *   fps: number,
+ *   beatData?: any,
+ *   durationInFrames: number,
+ * }}
+ * Uses mapper-derived composition metadata, including the full intro/main/outro duration.
  */
-function getOutroDuration() {
-  return VIDEO_DEFAULTS.outroDuration;
+function getCompositionSettings(props) {
+  const videoConfig = getVideoConfig(props);
+  const mappedConfig = mapVideoConfigToComposition(videoConfig, videoConfig.beatData);
+
+  return {
+    width: mappedConfig.composition.width,
+    height: mappedConfig.composition.height,
+    fps: mappedConfig.composition.fps,
+    durationInFrames: mappedConfig.composition.totalFrames,
+  };
 }
 
 /**
- * Returns the effective duration of one shot in frames.
- *
- * @param {any} shot
- * @returns {number}
+ * Studio/default composition settings derived from the canonical default config.
  */
-function getShotDuration(shot) {
-  return Number(
-    shot?.duration ?? shot?.durationInFrames ?? VIDEO_DEFAULTS.shotDuration
-  );
-}
+const DEFAULT_SETTINGS = getCompositionSettings(DEFAULT_VIDEO_CONFIG);
+
+/* -------------------------------------------------------------------------- */
+/* Metadata helpers                                                           */
+/* -------------------------------------------------------------------------- */
 
 /**
- * Returns the total duration of all configured shots.
- *
- * @param {any[]} shots
- * @returns {number}
- */
-function getShotsDuration(shots = []) {
-  return shots.reduce((sum, shot) => sum + getShotDuration(shot), 0);
-}
-
-/**
- * Returns the full composition duration in frames.
- *
- * @param {{shots?: any[]}} props
- * @returns {number}
- */
-function getCompositionDuration(props = {}) {
-  return getIntroDuration() + getShotsDuration(props.shots || []) + getOutroDuration();
-}
-
-/**
- * Returns Remotion metadata derived from the current composition props.
- * This keeps the real render duration aligned with the JSON input instead of
- * the studio fallback defaults.
+ * Returns Remotion metadata derived from canonical composition props.
  *
  * @param {{props: any}} options
- * @returns {{durationInFrames: number}}
+ * `options.props` uses the canonical root shape `{project, beatData, shots}` and is
+ * merged with root defaults before metadata is derived.
+ * @returns {{durationInFrames: number, width: number, height: number, fps: number}}
  */
 function calculateCompositionMetadata({props}) {
+  const settings = getCompositionSettings(getVideoConfig(props));
+
   return {
-    durationInFrames: getCompositionDuration(props || DEFAULT_PROPS),
+    durationInFrames: settings.durationInFrames,
+    width: settings.width,
+    height: settings.height,
+    fps: settings.fps,
   };
 }
 
@@ -173,12 +164,12 @@ export const RemotionRoot = () => {
     <Composition
       id="READMEVideo"
       component={READMEVideo}
-      width={VIDEO_DEFAULTS.width}
-      height={VIDEO_DEFAULTS.height}
-      fps={VIDEO_DEFAULTS.fps}
-      durationInFrames={getCompositionDuration(DEFAULT_PROPS)}
+      width={DEFAULT_SETTINGS.width}
+      height={DEFAULT_SETTINGS.height}
+      fps={DEFAULT_SETTINGS.fps}
+      durationInFrames={DEFAULT_SETTINGS.durationInFrames}
       calculateMetadata={calculateCompositionMetadata}
-      defaultProps={DEFAULT_PROPS}
+      defaultProps={DEFAULT_VIDEO_CONFIG}
     />
   );
 };

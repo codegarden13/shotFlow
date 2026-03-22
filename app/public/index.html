@@ -1,414 +1,590 @@
+<!-- ======================================================================= -->
+<!-- index.html                                                              -->
+<!-- ======================================================================= -->
+<!--
+  Purpose
+  -------
+  Main editor shell for the Remotion README video GUI.
+
+  Responsibilities
+  ----------------
+  - Define the three-column editor layout
+  - Expose stable DOM ids for frontend modules
+  - Host project-level video settings, timeline, stage and asset editor panels
+
+  Notes
+  -----
+  - Project-level video settings are autosaved from the frontend runtime.
+  - Title/subtitle action buttons were removed because blur/change handlers are
+    now responsible for persistence.
+
+  Change log
+  ----------
+  2026-03-17
+  - Added project-level video settings for aspect ratio, width, layer color,
+    intro text and outro text
+  - Removed title/subtitle buttons in favor of autosave-on-blur behavior
+  - Added a top-level document header for structure and maintainability
+  2026-03-18
+  - Moved the right-rail shot list into the active clip tab content
+  - Added a dedicated shot-list panel wrapper for cleaner sidebar layout
+-->
+<!-- ======================================================================= -->
 <!doctype html>
 <html lang="de">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Remotion README Video</title>
 
-    <link
-      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
-      rel="stylesheet"
-    />
-    <link rel="stylesheet" href="/assets/css/style.css" />
-       <link rel="stylesheet" href="/assets/css/timeline.css" />
-  </head>
-  <body>
-    <!-- ------------------------------------------------------------------- -->
-    <!-- Application shell                                                   -->
-    <!-- ------------------------------------------------------------------- -->
-    <main class="container-fluid py-3 app-shell">
-      <div class="row g-3 h-100">
-        <!-- ----------------------------------------------------------------- -->
-        <!-- Left rail: Render controls                                        -->
-        <!-- ----------------------------------------------------------------- -->
-        <div class="col-12 col-lg-3 col-xl-2">
-          <div class="left-sticky d-grid gap-3">
-            <section class="card left-card">
-              <div class="card-body">
-                <h1 class="h5 mb-3">Render</h1>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Remotion README Video</title>
 
-                <div class="mb-3">
-                  <div class="d-flex justify-content-between align-items-center small mb-1">
-                    <span class="text-secondary">Render-Fortschritt</span>
-                    <span id="renderProgressLabel" class="text-secondary">0%</span>
-                  </div>
-                  <div
-                    class="progress"
-                    role="progressbar"
-                    aria-label="Render-Fortschritt"
-                    aria-valuemin="0"
-                    aria-valuemax="100"
-                    aria-valuenow="0"
-                  >
-                    <div
-                      id="renderProgressBar"
-                      class="progress-bar progress-bar-striped"
-                      style="width: 0%"
-                    ></div>
-                  </div>
-                </div>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <link rel="stylesheet" href="/assets/css/style.css" />
+  <link rel="stylesheet" href="/assets/css/video-stage.css" />
+   <link rel="stylesheet" href="/assets/css/assets-sidebar.css" />
+  <link rel="stylesheet" href="/assets/js/audio-timeline/audio-timeline.css" />
+</head>
 
-                <button id="renderBtn" class="btn btn-primary w-100 mb-3" type="button">
-                  Render starten
-                </button>
-
-                <section class="render-info-panel small mb-3" id="renderInfoPanel">
-                  <div class="fw-semibold">Video-Infos</div>
-
-                  <div class="render-info-group" id="videoInfoGroup">
-                    <div class="render-info-row d-flex justify-content-between gap-2">
-                      <span class="text-secondary">Frames gesamt</span>
-                      <span id="videoInfoTotalFrames">–</span>
-                    </div>
-                    <div class="render-info-row d-flex justify-content-between gap-2">
-                      <span class="text-secondary">Dauer</span>
-                      <span id="videoInfoDuration">–</span>
-                    </div>
-                    <div class="render-info-row d-flex justify-content-between gap-2">
-                      <span class="text-secondary">FPS</span>
-                      <span id="videoInfoFps">–</span>
-                    </div>
-                    <div class="render-info-row d-flex justify-content-between gap-2">
-                      <span class="text-secondary">Auflösung</span>
-                      <span id="videoInfoResolution">–</span>
-                    </div>
-                    <div class="render-info-row d-flex justify-content-between gap-2">
-                      <span class="text-secondary">Format / Ratio</span>
-                      <span id="videoInfoAspectRatio">–</span>
-                    </div>
-                    <div class="render-info-row d-flex justify-content-between gap-2">
-                      <span class="text-secondary">Shots</span>
-                      <span id="videoInfoShots">–</span>
-                    </div>
-                    <div class="render-info-row d-flex justify-content-between gap-2">
-                      <span class="text-secondary">Shots mit Caption</span>
-                      <span id="videoInfoCaptionShots">–</span>
-                    </div>
-                    <div class="render-info-row d-flex justify-content-between gap-2">
-                      <span class="text-secondary">Shots mit Transition</span>
-                      <span id="videoInfoTransitionShots">–</span>
-                    </div>
-                    <div class="render-info-row d-flex justify-content-between gap-2">
-                      <span class="text-secondary">Intro / Outro</span>
-                      <span id="videoInfoIntroOutro">–</span>
-                    </div>
-                  </div>
-
-                  <div class="fw-semibold">Render-Infos</div>
-
-                  <div class="render-info-group" id="renderMetaGroup">
-                    <div class="render-info-row d-flex justify-content-between gap-2">
-                      <span class="text-secondary">Template / Look</span>
-                      <span id="renderInfoTemplateLook">–</span>
-                    </div>
-                    <div class="render-info-row d-flex justify-content-between gap-2">
-                      <span class="text-secondary">Geschätzte Renderdauer</span>
-                      <span id="renderInfoEstimatedDuration">–</span>
-                    </div>
-                    <div class="render-info-row d-flex justify-content-between gap-2">
-                      <span class="text-secondary">Output-Datei</span>
-                      <span id="renderInfoOutputFile">–</span>
-                    </div>
-                  </div>
-
-                  <div class="fw-semibold">Audio-Infos</div>
-
-                  <div class="render-info-group" id="audioInfoGroup">
-                    <div class="render-info-row d-flex justify-content-between gap-2">
-                      <span class="text-secondary">Audio vorhanden</span>
-                      <span id="audioInfoPresent">–</span>
-                    </div>
-                    <div class="render-info-row d-flex justify-content-between gap-2">
-                      <span class="text-secondary">Datei</span>
-                      <span id="audioInfoFile">–</span>
-                    </div>
-                    <div class="render-info-row d-flex justify-content-between gap-2">
-                      <span class="text-secondary">Audio-Dauer</span>
-                      <span id="audioInfoDuration">–</span>
-                    </div>
-                    <div class="render-info-row d-flex justify-content-between gap-2">
-                      <span class="text-secondary">Musik vs. Video</span>
-                      <span id="audioInfoMusicVsVideo">–</span>
-                    </div>
-                    <div class="render-info-row d-flex justify-content-between gap-2">
-                      <span class="text-secondary">Beat-Datei</span>
-                      <span id="audioInfoBeatFile">–</span>
-                    </div>
-                    <div class="render-info-row d-flex justify-content-between gap-2">
-                      <span class="text-secondary">Beats / Transienten</span>
-                      <span id="audioInfoBeatCount">–</span>
-                    </div>
-                    <div class="render-info-row d-flex justify-content-between gap-2">
-                      <span class="text-secondary">Beat-Sync aktiv</span>
-                      <span id="audioInfoBeatSyncActive">–</span>
-                    </div>
-                    <div class="render-info-row d-flex justify-content-between gap-2">
-                      <span class="text-secondary">Loop / Sync</span>
-                      <span id="audioInfoLoopMode">–</span>
-                    </div>
-                  </div>
-                </section>
-
-                <div id="status" class="small text-secondary">Bereit</div>
-              </div>
-            </section>
-
-            <section class="card left-card">
-              <div class="card-body">
-                <h2 class="h6 mb-3">Render-Optionen</h2>
-
-                <div class="mb-3">
-                  <label for="renderFormat" class="form-label">Format</label>
-                  <select id="renderFormat" class="form-select">
-                    <option value="standard">Standard 16:9</option>
-                    <option value="square">Quadratisch 1:1</option>
-                    <option value="portrait">Hochformat 9:16</option>
-                  </select>
-                </div>
-
-                <div class="mb-3">
-                  <label for="renderLook" class="form-label">Look</label>
-                  <select id="renderLook" class="form-select">
-                    <option value="default">Standard</option>
-                    <option value="bw">Schwarzweiß</option>
-                  </select>
-                </div>
-
-                <div class="form-check mb-2">
-                  <input class="form-check-input" type="checkbox" id="renderDraft" />
-                  <label class="form-check-label" for="renderDraft">
-                    Draft / schneller Test
-                  </label>
-                </div>
-              </div>
-            </section>
-
-            <section class="card left-card">
-              <div class="card-body">
-                <h2 class="h6 mb-3">Render-Log</h2>
-                <pre id="output" class="status-box bg-dark text-light rounded p-3 mb-0">Noch kein Render gestartet.</pre>
-              </div>
-            </section>
-          </div>
-        </div>
-
-        <!-- ----------------------------------------------------------------- -->
-        <!-- Center workspace                                                  -->
-        <!-- ----------------------------------------------------------------- -->
-        <div class="col-12 col-lg-6 col-xl-7 d-grid gap-3">
-          <section class="card workspace-card main-panel">
-            <div class="card-header d-flex justify-content-between align-items-center">
-              <div>
-                <strong>Segment / Detail</strong>
-                <div class="small text-secondary" id="panelCaption">
-                  Linealbereich und Segmentvorschau
-                </div>
-              </div>
-              <div class="small text-secondary" id="selectionInfo">
-                Playhead: 00:04 · Segment: Intro
-              </div>
-            </div>
-
+<body>
+  <!-- ------------------------------------------------------------------- -->
+  <!-- Application shell                                                   -->
+  <!-- ------------------------------------------------------------------- -->
+  <main class="container-fluid py-3 app-shell">
+    <div class="row g-3 h-100">
+      <!-- ----------------------------------------------------------------- -->
+      <!-- Left rail: Render controls                                        -->
+      <!-- ----------------------------------------------------------------- -->
+      <div class="col-12 col-lg-3 col-xl-2">
+        <div class="left-sticky d-grid gap-3">
+          <section class="card left-card">
             <div class="card-body">
-              <div class="main-stage">
-                <!-- ----------------------------------------------------------- -->
-                <!-- Ruler                                                       -->
-                <!-- ----------------------------------------------------------- -->
-                <div class="ruler-bar">
-                  <div class="d-flex justify-content-between small text-light-emphasis mb-2">
-                    <span>00:00</span>
-                    <span>00:05</span>
-                    <span>00:10</span>
-                    <span>00:15</span>
-                  </div>
+              <h1 class="h5 mb-3">Render</h1>
 
-                  <div class="ruler-track" id="rulerTrack">
-                    <div
-                      id="rulerSelection"
-                      class="ruler-selection"
-                      style="left: 13%; width: 24%"
-                    ></div>
-                    <div id="stagePlayhead" class="playhead-line" style="left: 18%">
-                      <div class="playhead-handle"></div>
-                    </div>
+              <div class="mb-3">
+                <label for="video-shots" class="form-label">video-shots</label>
+                <select id="video-shots" class="form-select">
+                  <option value="">Bitte wählen</option>
+                </select>
+              </div>
+
+              <div class="mb-3">
+                <div class="d-flex justify-content-between align-items-center small mb-1">
+                  <span class="text-secondary">Render-Fortschritt</span>
+                  <span id="renderProgressLabel" class="text-secondary">0%</span>
+                </div>
+                <div class="progress" role="progressbar" aria-label="Render-Fortschritt" aria-valuemin="0"
+                  aria-valuemax="100" aria-valuenow="0">
+                  <div id="renderProgressBar" class="progress-bar progress-bar-striped" style="width: 0%"></div>
+                </div>
+              </div>
+
+
+              <section class="render-info-panel small mb-3" id="renderInfoPanel">
+                <div class="fw-semibold">Video-Infos</div>
+
+                <div class="render-info-group" id="videoInfoGroup">
+                  <div class="render-info-row d-flex justify-content-between gap-2">
+                    <span class="text-secondary">Frames gesamt</span>
+                    <span id="videoInfoTotalFrames">–</span>
+                  </div>
+                  <div class="render-info-row d-flex justify-content-between gap-2">
+                    <span class="text-secondary">Dauer</span>
+                    <span id="videoInfoDuration">–</span>
+                  </div>
+                  <div class="render-info-row d-flex justify-content-between gap-2">
+                    <span class="text-secondary">FPS</span>
+                    <span id="videoInfoFps">–</span>
+                  </div>
+                  <div class="render-info-row d-flex justify-content-between gap-2">
+                    <span class="text-secondary">Auflösung</span>
+                    <span id="videoInfoResolution">–</span>
+                  </div>
+                  <div class="render-info-row d-flex justify-content-between gap-2">
+                    <span class="text-secondary">Format / Ratio</span>
+                    <span id="videoInfoAspectRatio">–</span>
+                  </div>
+                  <div class="render-info-row d-flex justify-content-between gap-2">
+                    <span class="text-secondary">Shots</span>
+                    <span id="videoInfoShots">–</span>
+                  </div>
+                  <div class="render-info-row d-flex justify-content-between gap-2">
+                    <span class="text-secondary">Shots mit Caption</span>
+                    <span id="videoInfoCaptionShots">–</span>
+                  </div>
+                  <div class="render-info-row d-flex justify-content-between gap-2">
+                    <span class="text-secondary">Shots mit Transition</span>
+                    <span id="videoInfoTransitionShots">–</span>
+                  </div>
+                  <div class="render-info-row d-flex justify-content-between gap-2">
+                    <span class="text-secondary">Intro / Outro</span>
+                    <span id="videoInfoIntroOutro">–</span>
                   </div>
                 </div>
 
-                <!-- ----------------------------------------------------------- -->
-                <!-- Preview stage                                               -->
-                <!-- ----------------------------------------------------------- -->
-                <div id="videoStage" class="video-stage">
-                  <div class="stage-frame" id="stageFrame">
-                    <img
-                      id="stagePreviewImage"
-                      class="stage-preview-image"
-                      src="/video-shots/hero.png"
-                      alt="Aktuelle Segmentvorschau"
-                    />
+                <div class="fw-semibold">Render-Infos</div>
 
-                    <div class="video-placeholder" id="videoPlaceholder">
-                      <span class="badge bg-primary">Segmentansicht</span>
-                      <div class="h4 mb-0">Aktueller Bereich</div>
-                      <div class="text-center opacity-75 px-4">
-                        Vorschau des aktuellen Segments am roten Playhead.
-                      </div>
-                    </div>
-
-                    <div class="stage-preview-overlay">
-                      <div>
-                        <div class="fw-semibold" id="stageSegmentTitle">Intro</div>
-                        <div class="small opacity-75" id="stageSegmentTime">
-                          00:00 – 00:04
-                        </div>
-                      </div>
-                      <div class="small opacity-75">
-                        Scrub über die Timeline, um Bilder zu wechseln
-                      </div>
-                    </div>
+                <div class="render-info-group" id="renderMetaGroup">
+                  <div class="render-info-row d-flex justify-content-between gap-2">
+                    <span class="text-secondary">Template / Look</span>
+                    <span id="renderInfoTemplateLook">–</span>
+                  </div>
+                  <div class="render-info-row d-flex justify-content-between gap-2">
+                    <span class="text-secondary">Geschätzte Renderdauer</span>
+                    <span id="renderInfoEstimatedDuration">–</span>
+                  </div>
+                  <div class="render-info-row d-flex justify-content-between gap-2">
+                    <span class="text-secondary">Output-Datei</span>
+                    <span id="renderInfoOutputFile">–</span>
                   </div>
                 </div>
 
-                <!-- ----------------------------------------------------------- -->
-                <!-- JSON editor                                                 -->
-                <!-- ----------------------------------------------------------- -->
-                <div id="jsonEditor" class="form-panel p-4 d-none">
-                  <div class="d-flex justify-content-between align-items-center mb-3">
-                    <div>
-                      <div class="fw-semibold">JSON-Daten</div>
-                      <div class="small text-secondary" id="jsonFileName">
-                        Kein Bild gewählt
-                      </div>
-                    </div>
-                    <button
-                      id="backToSegmentBtn"
-                      type="button"
-                      class="btn btn-outline-secondary btn-sm"
-                    >
-                      Zurück zum Segment
-                    </button>
-                  </div>
+                <div class="fw-semibold">Audio-Infos</div>
 
-                  <div class="row g-3">
-                    <div class="col-md-6">
-                      <label for="fieldSrc" class="form-label">src</label>
-                      <input id="fieldSrc" class="form-control" type="text" />
-                    </div>
-                    <div class="col-md-6">
-                      <label for="fieldTitle" class="form-label">title</label>
-                      <input id="fieldTitle" class="form-control" type="text" />
-                    </div>
-                    <div class="col-md-6">
-                      <label for="fieldDuration" class="form-label">duration</label>
-                      <input id="fieldDuration" class="form-control" type="number" />
-                    </div>
-                    <div class="col-md-6">
-                      <label for="fieldTransition" class="form-label">transition</label>
-                      <input id="fieldTransition" class="form-control" type="text" />
-                    </div>
-                    <div class="col-md-6">
-                      <label for="fieldZoom" class="form-label">zoom</label>
-                      <input id="fieldZoom" class="form-control" type="number" step="0.1" />
-                    </div>
-                    <div class="col-md-6">
-                      <label for="fieldPan" class="form-label">pan</label>
-                      <input id="fieldPan" class="form-control" type="text" />
-                    </div>
-                    <div class="col-12">
-                      <label for="fieldCaption" class="form-label">caption</label>
-                      <textarea id="fieldCaption" class="form-control" rows="4"></textarea>
-                    </div>
+                <div class="render-info-group" id="audioInfoGroup">
+                  <div class="render-info-row d-flex justify-content-between gap-2">
+                    <span class="text-secondary">Audio vorhanden</span>
+                    <span id="audioInfoPresent">–</span>
+                  </div>
+                  <div class="render-info-row d-flex justify-content-between gap-2">
+                    <span class="text-secondary">Datei</span>
+                    <span id="audioInfoFile">–</span>
+                  </div>
+                  <div class="render-info-row d-flex justify-content-between gap-2">
+                    <span class="text-secondary">Audio-Dauer</span>
+                    <span id="audioInfoDuration">–</span>
+                  </div>
+                  <div class="render-info-row d-flex justify-content-between gap-2">
+                    <span class="text-secondary">Audio-Start</span>
+                    <span id="audioInfoStartOffset">–</span>
+                  </div>
+                  <div class="render-info-row d-flex justify-content-between gap-2">
+                    <span class="text-secondary">Musik vs. Video</span>
+                    <span id="audioInfoMusicVsVideo">–</span>
+                  </div>
+                  <div class="render-info-row d-flex justify-content-between gap-2">
+                    <span class="text-secondary">Beat-Datei</span>
+                    <span id="audioInfoBeatFile">–</span>
+                  </div>
+                  <div class="render-info-row d-flex justify-content-between gap-2">
+                    <span class="text-secondary">Beats / Transienten</span>
+                    <span id="audioInfoBeatCount">–</span>
+                  </div>
+                  <div class="render-info-row d-flex justify-content-between gap-2">
+                    <span class="text-secondary">Beat-Sync aktiv</span>
+                    <span id="audioInfoBeatSyncActive">–</span>
+                  </div>
+                  <div class="render-info-row d-flex justify-content-between gap-2">
+                    <span class="text-secondary">Loop / Sync</span>
+                    <span id="audioInfoLoopMode">–</span>
                   </div>
                 </div>
+              </section>
+
+              <div id="status" class="small text-secondary">Bereit</div>
+            </div>
+          </section>
+
+          <section class="card left-card">
+            <div class="card-body">
+              <h2 class="h6 mb-3">Render-Optionen</h2>
+
+              <div class="mb-3">
+                <label for="renderFormat" class="form-label">Format</label>
+                <select id="renderFormat" class="form-select">
+                  <option value="standard">Standard 16:9</option>
+                  <option value="square">Quadratisch 1:1</option>
+                  <option value="portrait">Hochformat 9:16</option>
+                </select>
+              </div>
+
+              <div class="mb-3">
+                <label for="renderLook" class="form-label">Look</label>
+                <select id="renderLook" class="form-select">
+                  <option value="default">Standard</option>
+                  <option value="bw">Schwarzweiß</option>
+                </select>
+              </div>
+
+              <div class="form-check mb-2">
+                <input class="form-check-input" type="checkbox" id="renderDraft" />
+                <label class="form-check-label" for="renderDraft">
+                  Draft / schneller Test
+                </label>
               </div>
             </div>
           </section>
 
-          <!-- ----------------------------------------------------------------- -->
-          <!-- Timeline panel                                                    -->
-          <!-- ----------------------------------------------------------------- -->
-          <section class="card workspace-card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-              <strong>Timeline / Audio</strong>
-              <span class="small text-secondary">
-                Wellenform, Beat-Transienten und Segmente folgen dem roten Playhead
-              </span>
-            </div>
-
+          <section class="card left-card">
             <div class="card-body">
-              <div class="timeline-shell p-3" id="timelineShell">
-                <div class="timeline-scale" id="timelineScale"></div>
-
-                <div class="timeline-stage" id="timelineStage">
-                  <div class="timeline-segments-layer" id="timelineSegmentsLayer"></div>
-                  <div class="timeline-beats-layer" id="timelineBeatsLayer"></div>
-                  <div class="timeline-waveform-layer" id="timelineWaveformLayer">
-                    <canvas id="timelineWaveformCanvas" class="timeline-waveform-canvas"></canvas>
-                  </div>
-                  <div id="timelinePlayhead" class="timeline-playhead"></div>
-                </div>
-
-                <div class="timeline-footer small text-secondary" id="timelineFooter"></div>
-              </div>
-            </div>
-          </section>
-        </div>
-
-        <!-- ----------------------------------------------------------------- -->
-        <!-- Right rail: Asset browser                                         -->
-        <!-- ----------------------------------------------------------------- -->
-        <div class="col-12 col-lg-3 col-xl-3">
-          <section class="card sidebar-card h-100">
-            <div class="card-header d-flex justify-content-between align-items-center">
-              <strong>Bilder</strong>
-              <span class="small text-secondary">Klick = JSON bearbeiten</span>
-            </div>
-            <div class="card-body d-grid gap-3">
-              <div class="video-meta-editor d-grid gap-3">
-                <div>
-                  <label for="videoTitleInput" class="form-label small text-secondary mb-1"
-                    >Video Title</label
-                  >
-                  <div class="input-group input-group-sm">
-                    <input
-                      id="videoTitleInput"
-                      class="form-control"
-                      type="text"
-                      placeholder="Titel des Videos"
-                    />
-                    <button id="setVideoTitleBtn" class="btn btn-outline-primary" type="button">
-                      Set Title
-                    </button>
-                  </div>
-                </div>
-
-                <div>
-                  <label for="videoSubtitleInput" class="form-label small text-secondary mb-1"
-                    >Video Subtitle</label
-                  >
-                  <div class="input-group input-group-sm">
-                    <input
-                      id="videoSubtitleInput"
-                      class="form-control"
-                      type="text"
-                      placeholder="Subtitle des Videos"
-                    />
-                    <button
-                      id="setVideoSubtitleBtn"
-                      class="btn btn-outline-primary"
-                      type="button"
-                    >
-                      Set Subtitle
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <div id="assetList" class="asset-list"></div>
+              <h2 class="h6 mb-3">Render-Log</h2>
+              <pre id="output" class="status-box bg-dark text-light rounded p-3 mb-0">Noch kein Render gestartet.</pre>
             </div>
           </section>
         </div>
       </div>
-    </main>
-    <script type="module" src="/index.js"></script>
-  </body>
+
+      <!-- ----------------------------------------------------------------- -->
+      <!-- Center workspace                                                  -->
+      <!-- ----------------------------------------------------------------- -->
+      <div class="col-12 col-lg-6 col-xl-7 d-flex flex-column gap-3 workspace-stack">
+        <section class="card workspace-card video-setup-card">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <div>
+              <strong>Video-Setup</strong>
+              <div class="small text-secondary">
+                Zentrale, editierbare Videoinfos für Rendering und Ausgabe
+              </div>
+            </div>
+            <span class="small text-secondary">Autosave in <code>video.config.json</code></span>
+          </div>
+
+          <div class="card-body">
+            <section class="video-meta-editor form-panel p-0 d-grid gap-2 mb-0">
+              <div class="row g-3">
+                <div class="col-12 col-xl-6">
+                  <label for="videoTitleInput" class="form-label small text-secondary mb-1">
+                    Video Title
+                  </label>
+                  <input id="videoTitleInput" class="form-control form-control-sm" type="text"
+                    placeholder="Titel des Videos" />
+                </div>
+
+                <div class="col-12 col-xl-6">
+                  <label for="videoSubtitleInput" class="form-label small text-secondary mb-1">
+                    Video Subtitle
+                  </label>
+                  <input id="videoSubtitleInput" class="form-control form-control-sm" type="text"
+                    placeholder="Subtitle des Videos" />
+                </div>
+
+                <div class="col-12 col-md-6 col-xl-3">
+                  <label for="videoAspectRatioInput" class="form-label small text-secondary mb-1">
+                    Seitenverhältnis
+                  </label>
+                  <select id="videoAspectRatioInput" class="form-select form-select-sm">
+                    <option value="16:9">16:9</option>
+                    <option value="1:1">1:1</option>
+                    <option value="9:16">9:16</option>
+                    <option value="4:5">4:5</option>
+                    <option value="3:2">3:2</option>
+                  </select>
+                </div>
+
+                <div class="col-12 col-md-6 col-xl-3">
+                  <label for="videoWidthInput" class="form-label small text-secondary mb-1">
+                    Pixelbreite
+                  </label>
+                  <input id="videoWidthInput" class="form-control form-control-sm" type="number" min="320"
+                    step="1" placeholder="z. B. 1920" />
+                </div>
+
+                <div class="col-12 col-md-6 col-xl-3">
+                  <label for="videoLayerColorInput" class="form-label small text-secondary mb-1">
+                    Layer-Farbe
+                  </label>
+                  <input id="videoLayerColorInput" class="form-control form-control-sm" type="text"
+                    placeholder="#0b1020" />
+                </div>
+
+                <div class="col-12 col-md-6 col-xl-3">
+                  <label for="videoAudioStartSecondsInput" class="form-label small text-secondary mb-1">
+                    Audio-Start (s)
+                  </label>
+                  <input id="videoAudioStartSecondsInput" class="form-control form-control-sm" type="number" min="0"
+                    step="0.1" placeholder="0" />
+                </div>
+
+                <div class="col-12 col-md-6 col-xl-3">
+                  <label for="videoTargetDurationSecondsInput" class="form-label small text-secondary mb-1">
+                    Zieldauer (s)
+                  </label>
+                  <input id="videoTargetDurationSecondsInput" class="form-control form-control-sm" type="number" min="0"
+                    step="0.1" placeholder="wird aus Shots abgeleitet" />
+                </div>
+
+                <div class="col-12 col-md-6 col-xl-3">
+                  <label for="videoIntroDurationInput" class="form-label small text-secondary mb-1">
+                    Intro Duration (s)
+                  </label>
+                  <input id="videoIntroDurationInput" class="form-control form-control-sm" type="number" min="0"
+                    step="0.1" placeholder="0" />
+                </div>
+
+                <div class="col-12 col-md-6 col-xl-3">
+                  <label for="videoOutroDurationInput" class="form-label small text-secondary mb-1">
+                    Outro Duration (s)
+                  </label>
+                  <input id="videoOutroDurationInput" class="form-control form-control-sm" type="number" min="0"
+                    step="0.1" placeholder="0" />
+                </div>
+
+                <div class="col-12 col-md-6 col-xl-3">
+                  <label for="videoTemplateInput" class="form-label small text-secondary mb-1">
+                    Template
+                  </label>
+                  <select id="videoTemplateInput" class="form-select form-select-sm">
+                    <option value="clean-showcase">Clean Showcase</option>
+                    <option value="fast-social">Fast Social</option>
+                    <option value="premium-cinematic">Premium Cinematic</option>
+                  </select>
+                </div>
+
+                <div class="col-12 col-md-6 col-xl-3">
+                  <label for="videoOutroTextInput" class="form-label small text-secondary mb-1">
+                    Outro-Text
+                  </label>
+                  <input id="videoOutroTextInput" class="form-control form-control-sm" type="text"
+                    placeholder="by xviz.de" />
+                </div>
+
+                <div class="col-12">
+                  <label for="videoIntroTextInput" class="form-label small text-secondary mb-1">
+                    Intro-Text / Intro-Notiz
+                  </label>
+                  <textarea id="videoIntroTextInput" class="form-control form-control-sm" rows="2"
+                    placeholder="Freier Introtext oder Projekt-Notiz"></textarea>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+        <section class="card workspace-card main-panel">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <div>
+              <strong>Preview / Render</strong>
+              <div class="small text-secondary" id="panelCaption">
+                Linealbereich und Segmentvorschau
+              </div>
+            </div>
+            <div class="small text-secondary" id="selectionInfo">
+              Playhead: 00:00 · Segment: –
+            </div>
+          </div>
+
+          <div class="card-body py-3">
+            <div class="main-stage compact-main-stage">
+              <div id="videoStage" class="video-stage compact-video-stage">
+                <div class="stage-frame rendered-video-frame" id="stageFrame">
+                  <video id="renderedVideoPlayer" class="rendered-video-player" controls preload="metadata"
+                    playsinline></video>
+
+
+
+                  <div class="video-placeholder" id="videoPlaceholder">
+                    <button
+                      id="renderBtn"
+                      class="btn btn-primary video-placeholder-render-btn"
+                      type="button"
+                    >
+                      Render / Preview starten
+                    </button>
+                    <div class="h4 mb-0">Noch kein gerendertes Video geladen</div>
+                    <div class="text-center opacity-75 px-4">
+                      Nach dem Rendern kann hier das zuletzt erzeugte Video angezeigt werden.
+                    </div>
+                  </div>
+
+
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ----------------------------------------------------------------- -->
+        <!-- Timeline panel                                                    -->
+        <!-- ----------------------------------------------------------------- -->
+        <section class="card workspace-card">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <strong>Timeline / Audio</strong>
+            <span class="small text-secondary">
+              Wellenform, Beat-Transienten und Segmente folgen dem roten Playhead
+            </span>
+          </div>
+
+          <div class="card-body">
+            <div class="timeline-shell p-3" id="timelineShell">
+              <div class="timeline-row video-timeline-row">
+                <div class="timeline-row-header d-flex justify-content-between align-items-center mb-2">
+                  <strong class="small">Video-Segmente</strong>
+                  <span class="small text-secondary">Skala = Videodauer</span>
+                </div>
+                <div class="timeline-scale" id="timelineScale"></div>
+                <div class="timeline-stage video-timeline-stage" id="timelineStage">
+                  <div class="timeline-segments-layer" id="timelineSegmentsLayer"></div>
+                </div>
+              </div>
+
+              <div class="timeline-row audio-timeline-row mt-3">
+                <div class="timeline-row-header d-flex justify-content-between align-items-center mb-2">
+                  <strong class="small">Audio-Timeline</strong>
+                  <span class="small text-secondary">Skala = Audiodauer / Loop</span>
+                </div>
+                <div class="timeline-scale" id="audioTimelineScale"></div>
+                <div class="audio-timeline-stage" id="audioTimelineStage">
+                  <div id="audioTimelineSvgHost" class="audio-timeline-svg-host" aria-label="Audio Timeline"></div>
+                </div>
+              </div>
+
+              <div class="timeline-footer small text-secondary" id="timelineFooter"></div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- ----------------------------------------------------------------- -->
+      <!-- Right rail: Asset browser                                         -->
+      <!-- ----------------------------------------------------------------- -->
+      <div class="col-12 col-lg-3 col-xl-3">
+        <section class="card sidebar-card h-100">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <strong>Clip</strong>
+            <span class="small text-secondary">Klick = JSON bearbeiten</span>
+          </div>
+         <div class="card-body sidebar-body">
+
+            <section class="sidebar-tab-panel">
+              <!--
+                Both right-sidebar tabs must stay as real Bootstrap tabs.
+                Do not mark `selectedSectionTab` as disabled in HTML, otherwise
+                it cannot be opened by click or via Bootstrap's Tab API.
+              -->
+              <ul class="nav nav-tabs nav-sm" id="rightSidebarTabs" role="tablist">
+                <li class="nav-item" role="presentation">
+                  <button class="nav-link active" id="clipTab" data-bs-toggle="tab" data-bs-target="#clipPane"
+                    type="button" role="tab" aria-controls="clipPane" aria-selected="true">
+                    Clip
+                  </button>
+                </li>
+                <li class="nav-item" role="presentation">
+                  <button class="nav-link" id="selectedSectionTab" data-bs-toggle="tab"
+                    data-bs-target="#selectedSectionPane" type="button" role="tab" aria-controls="selectedSectionPane"
+                    aria-selected="false">
+                    Gewählte Section
+                  </button>
+                </li>
+              </ul>
+
+              <div class="tab-content pt-3" id="rightSidebarTabContent">
+                <div class="tab-pane show active" id="clipPane" role="tabpanel" aria-labelledby="clipTab" tabindex="0">
+
+                  <section class="form-panel p-3 asset-list-panel">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                      <div>
+                        <div class="fw-semibold">Shotliste</div>
+                        <div class="small text-secondary">Drag &amp; Drop für Auswahl und Reihenfolge</div>
+                      </div>
+                    </div>
+
+                    <div class="shot-assignment-board" id="shotAssignmentBoard">
+                      <div class="row g-3">
+                        <div class="col-12 col-xl-6">
+                          <section
+                            class="shot-column shot-list-dropzone"
+                            id="selectedShotDropzone"
+                            data-shot-list="selected"
+                            aria-labelledby="selectedShotsHeading"
+                            aria-label="Ausgewählte Shots"
+                          >
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                              <div>
+                                <div class="fw-semibold" id="selectedShotsHeading">Ausgewählt</div>
+                                <div class="small text-secondary">Im Video enthalten · Reihenfolge per Drag &amp; Drop</div>
+                              </div>
+                              <span class="badge text-bg-primary" id="selectedShotsCount">0</span>
+                            </div>
+                            <div
+                              id="selectedShotList"
+                              class="asset-list selected-shot-list"
+                            ></div>
+                          </section>
+                        </div>
+
+                        <div class="col-12 col-xl-6">
+                          <section
+                            class="shot-column shot-list-dropzone"
+                            id="unselectedShotDropzone"
+                            data-shot-list="unselected"
+                            aria-labelledby="unselectedShotsHeading"
+                            aria-label="Nicht ausgewählte Shots"
+                          >
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                              <div>
+                                <div class="fw-semibold" id="unselectedShotsHeading">Nicht ausgewählt</div>
+                                <div class="small text-secondary">Verfügbare Assets · Per Drag &amp; Drop hinzufügen</div>
+                              </div>
+                              <span class="badge text-bg-secondary" id="unselectedShotsCount">0</span>
+                            </div>
+                            <div
+                              id="unselectedShotList"
+                              class="asset-list unselected-shot-list"
+                            ></div>
+                          </section>
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+                </div>
+
+                <div class="tab-pane" id="selectedSectionPane" role="tabpanel" aria-labelledby="selectedSectionTab"
+                  tabindex="0">
+                  <section id="jsonEditor" class="form-panel p-3">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                      <div>
+                        <div class="fw-semibold">Clip-Metadaten</div>
+                        <div class="small text-secondary" id="jsonFileName">
+                          Kein Clip gewählt
+                        </div>
+                      </div>
+                      <button id="backToSegmentBtn" type="button" class="btn btn-outline-secondary btn-sm">
+                        Reset Auswahl
+                      </button>
+                    </div>
+
+                    <div class="row g-3">
+                      <div class="col-12">
+                        <label for="fieldSrc" class="form-label">src</label>
+                        <input id="fieldSrc" class="form-control form-control-sm" type="text" />
+                      </div>
+                      <div class="col-12">
+                        <label for="fieldTitle" class="form-label">title</label>
+                        <input id="fieldTitle" class="form-control form-control-sm" type="text" />
+                      </div>
+                      <div class="col-6">
+                        <label for="fieldDuration" class="form-label">duration</label>
+                        <input id="fieldDuration" class="form-control form-control-sm" type="number" />
+                      </div>
+                      <div class="col-6">
+                        <label for="fieldTransition" class="form-label">transition</label>
+                        <input id="fieldTransition" class="form-control form-control-sm" type="text" />
+                      </div>
+                      <div class="col-6">
+                        <label for="fieldZoom" class="form-label">zoom</label>
+                        <input id="fieldZoom" class="form-control form-control-sm" type="number" step="0.1" />
+                      </div>
+                      <div class="col-6">
+                        <label for="fieldPan" class="form-label">pan</label>
+                        <input id="fieldPan" class="form-control form-control-sm" type="text" />
+                      </div>
+                      <div class="col-12">
+                        <label for="fieldCaption" class="form-label">caption</label>
+                        <textarea id="fieldCaption" class="form-control form-control-sm" rows="4"></textarea>
+                      </div>
+                    </div>
+                  </section>
+                </div>
+              </div>
+            </section>
+
+          </div>
+        </section>
+      </div>
+    </div>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
+  <script type="module" src="/index.js"></script>
+</body>
+
 </html>

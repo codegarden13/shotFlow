@@ -1,10 +1,11 @@
 
-
 import path from "node:path";
-import fs from "node:fs/promises";
-import { fileURLToPath } from "node:url";
-import { bundle } from "@remotion/bundler";
-import { selectComposition, renderStill } from "@remotion/renderer";
+import {fileURLToPath} from "node:url";
+import {bundle} from "@remotion/bundler";
+import {renderStill, selectComposition} from "@remotion/renderer";
+
+import {loadAppRuntimeContext} from "../../config/app-config.js";
+import {copyFile, ensureDir, readJson} from "../server/video-files.js";
 
 /* -------------------------------------------------------------------------- */
 /* Paths                                                                      */
@@ -15,7 +16,6 @@ const __dirname = path.dirname(__filename);
 const appRoot = path.resolve(__dirname, "../..");
 
 const PATHS = {
-  configFile: path.join(appRoot, "config", "config.json"),
   remotionEntry: path.join(appRoot, "remotion", "entry.jsx"),
   publicShotsDir: path.join(appRoot, "public", "assets", "img", "video-shots"),
   previewsDir: path.join(appRoot, "public", "previews"),
@@ -28,19 +28,6 @@ const PATHS = {
 const COMPOSITION_ID = "READMEVideo";
 const DEFAULT_PREVIEW_NAME = "current-frame.png";
 const DEFAULT_FRAME = 0;
-
-/* -------------------------------------------------------------------------- */
-/* File helpers                                                               */
-/* -------------------------------------------------------------------------- */
-
-async function readJsonFile(filePath) {
-  const fileContents = await fs.readFile(filePath, "utf8");
-  return JSON.parse(fileContents);
-}
-
-async function ensureDirectory(dirPath) {
-  await fs.mkdir(dirPath, { recursive: true });
-}
 
 /* -------------------------------------------------------------------------- */
 /* CLI argument helpers                                                       */
@@ -112,6 +99,8 @@ function resolvePreviewOptions() {
   const cliArgs = parseCliArgs(process.argv.slice(2));
 
   return {
+    project: cliArgs.project ? String(cliArgs.project).trim() : "",
+  
     frame: Math.max(0, normalizeInteger(cliArgs.frame, DEFAULT_FRAME)),
     format: String(cliArgs.format || "standard"),
     look: String(cliArgs.look || "default"),
@@ -124,23 +113,6 @@ function resolvePreviewOptions() {
 /* Config helpers                                                             */
 /* -------------------------------------------------------------------------- */
 
-function normalizeBasePath(value = "") {
-  return String(value).replace(/\/$/, "");
-}
-
-function resolveVideoConfigPath(basePath) {
-  if (!basePath) {
-    throw new Error('config.json is missing required field "base".');
-  }
-
-  if (!path.isAbsolute(basePath)) {
-    throw new Error(
-      `config.base must be an absolute local filesystem path. Received: ${basePath}`
-    );
-  }
-
-  return path.join(basePath, "video-shots", "video.config.json");
-}
 
 function validateShotSource(src) {
   if (typeof src !== "string" || !src.trim()) {
@@ -170,7 +142,7 @@ async function copyShotToPublic(sourcePath) {
   const fileName = path.basename(sourcePath);
   const targetPath = path.join(PATHS.publicShotsDir, fileName);
 
-  await fs.copyFile(sourcePath, targetPath);
+  await copyFile(sourcePath, targetPath);
 
   return toPublicShotSrc(fileName);
 }
@@ -198,16 +170,18 @@ async function prepareShots(configDir, shots) {
 /* -------------------------------------------------------------------------- */
 
 async function loadInputProps(previewOptions) {
-  const appConfig = await readJsonFile(PATHS.configFile);
-  const basePath = normalizeBasePath(appConfig.base || "");
-  const videoConfigPath = resolveVideoConfigPath(basePath);
-  const videoConfig = await readJsonFile(videoConfigPath);
-  const videoConfigDir = path.dirname(videoConfigPath);
+  //const {videoShotsDir, activeProject} = await loadAppRuntimeContext(preferredProjectName);
+  const {videoShotsDir, activeProject} = await loadAppRuntimeContext(previewOptions.project);
 
-  await ensureDirectory(PATHS.publicShotsDir);
-  await ensureDirectory(PATHS.previewsDir);
 
-  const preparedShots = await prepareShots(videoConfigDir, videoConfig.shots);
+
+  const videoConfigPath = path.join(videoShotsDir, "video.config.json");
+  const videoConfig = await readJson(videoConfigPath);
+
+  await ensureDir(PATHS.publicShotsDir);
+  await ensureDir(PATHS.previewsDir);
+
+  const preparedShots = await prepareShots(videoShotsDir, videoConfig.shots);
 
   return {
     ...videoConfig,

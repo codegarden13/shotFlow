@@ -9,7 +9,7 @@
  *
  * Responsibilities
  * ----------------
- * - Hold mutable browser-session state for the current editor runtime
+ * - Hold mutable browser-session state for the active editor runtime
  * - Define stable UI labels reused across frontend modules
  * - Define shared shot defaults for incomplete or unconfigured shot data
  * - Provide a safe fallback segment for empty timeline states
@@ -20,7 +20,6 @@
  * - transient request and interaction flags
  * - active asset and timeline selection state
  * - render-progress runtime state
- * - editable video title / subtitle values
  * - shared UI labels and shot defaults
  *
  * Notes
@@ -28,15 +27,17 @@
  * - Values in `state` are intentionally mutable.
  * - Values in `UI_TEXT`, `SHOT_DEFAULTS` and `EMPTY_SEGMENT` are shared
  *   constants and should be treated as read-only.
+ * - DOM references do not live in this module. They belong in `dom.js`.
  * - This module does not access the DOM and does not perform side effects.
- *
- * Change log
- * ----------
- * 2026-03-15
- * - Refactored comments and section wording for consistency with newer modules
- * - Kept state shape, labels and defaults unchanged
+ * - Duration handling is normalized around canonical `durationSeconds`.
  */
 /* ========================================================================== */
+
+/* -------------------------------------------------------------------------- */
+/* Local constants                                                            */
+/* -------------------------------------------------------------------------- */
+
+const DEFAULT_SHOT_DURATION_SECONDS = 3;
 
 /* -------------------------------------------------------------------------- */
 /* Mutable application runtime state                                          */
@@ -60,12 +61,21 @@ export const state = {
 
   segments: [],
   assets: [],
+  shots: [],
+
+  activeProject: "",
+  rawProjectConfig: null,
+  projectConfig: null,
+  videoShotsDir: "",
+  videoConfigPath: "",
+
+  selectedShotIndex: -1,
+  selectedSegmentIndex: -1,
+  selectedSection: "overview",
+  selectedSectionTab: "clip",
 
   renderProgressTimer: null,
   renderProgressValue: 0,
-
-  videoTitle: "",
-  videoSubtitle: "",
 };
 
 /* -------------------------------------------------------------------------- */
@@ -76,6 +86,8 @@ export const state = {
  * Reusable UI labels and status messages shared across frontend modules.
  */
 export const UI_TEXT = {
+  defaultSectionTab: "clip",
+
   segmentModeCaption: "Linealbereich und Segmentvorschau",
   assetModeCaption: "Editierbare JSON-Daten des gewählten Bildes",
 
@@ -112,7 +124,8 @@ export const UI_TEXT = {
  * Stable fallback values for shot fields that are missing from config data.
  */
 export const SHOT_DEFAULTS = {
-  duration: 90,
+  durationSeconds: DEFAULT_SHOT_DURATION_SECONDS,
+  duration: DEFAULT_SHOT_DURATION_SECONDS,
   zoom: 1,
   transition: "",
   pan: "center",
