@@ -104,5 +104,4 @@ Minimal, fast, and focused on getting video ideas rendered quickly.
 ## Status
 
 ⚠️ This repository is no longer actively maintained.
-⚠️ Dieses Repository wird nicht mehr aktiv weiterentwickelt.
-
+Nehm es als Seed für Codex oder Claude und mach was draus. Die Welt hat sich geändert.
